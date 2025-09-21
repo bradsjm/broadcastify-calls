@@ -41,7 +41,7 @@ class SessionToken:
 class Call:
     """Represents metadata for a Broadcastify call."""
 
-    call_id: int
+    call_id: str
     system_id: int
     talkgroup_id: int
     received_at: datetime
@@ -92,7 +92,7 @@ class CallEvent:
 class AudioChunkEvent:
     """Event carrying an audio chunk for downstream consumers."""
 
-    call_id: int
+    call_id: str
     sequence: int
     start_offset: float
     end_offset: float
@@ -105,7 +105,7 @@ class AudioChunkEvent:
 class TranscriptionPartial:
     """Represents an intermediate transcription update for a call."""
 
-    call_id: int
+    call_id: str
     chunk_index: int
     start_time: float
     end_time: float
@@ -117,7 +117,7 @@ class TranscriptionPartial:
 class TranscriptionResult:
     """Represents the completed transcription for a call."""
 
-    call_id: int
+    call_id: str
     text: str
     language: str
     average_logprob: float | None

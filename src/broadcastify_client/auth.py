@@ -47,8 +47,13 @@ class HttpAuthenticationBackend(AuthenticationBackend):
 
         logger.debug("Submitting Broadcastify login request for user %s", credentials.username)
         response = await self._http_client.post_form(
-            "/login/",
-            data={"username": credentials.username, "password": credentials.password},
+            url="/login/",
+            data={
+                "username": credentials.username,
+                "password": credentials.password,
+                "action": "auth",
+                "redirect": "https://www.broadcastify.com",
+            },
         )
         token_value = _extract_session_cookie(response.cookies)
         if token_value is None:
@@ -60,7 +65,7 @@ class HttpAuthenticationBackend(AuthenticationBackend):
         """Try to inform Broadcastify that the session should be terminated."""
 
         try:
-            await self._http_client.get("/logout/")
+            await self._http_client.get("/account/?action=logout")
         except httpx.HTTPError as exc:  # pragma: no cover - best effort path
             logger.warning("Broadcastify logout request failed", exc_info=exc)
             return
@@ -69,11 +74,8 @@ class HttpAuthenticationBackend(AuthenticationBackend):
 def _extract_session_cookie(cookies: httpx.Cookies) -> str | None:
     """Return the known session cookie value if present."""
 
-    for key in ("broadcastify", "PHPSESSID", "session"):
-        cookie = cookies.get(key)
-        if cookie:
-            return cookie
-    return None
+    cookie = cookies.get("bcfyuser1", None)
+    return cookie
 
 
 CredentialsOrToken = Credentials | SessionToken

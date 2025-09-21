@@ -29,7 +29,7 @@ def test_parse_cli_args_rejects_negative_metadata_limit() -> None:
 
 def test_format_call_event_renders_expected_fields() -> None:
     call = Call(
-        call_id=123,
+        call_id="9-456",
         system_id=9,
         talkgroup_id=456,
         received_at=datetime(2025, 9, 21, 12, 30, tzinfo=UTC),
@@ -44,7 +44,7 @@ def test_format_call_event_renders_expected_fields() -> None:
         shard_key=(9, 456),
     )
     line = format_call_event(event, metadata_limit=2)
-    assert "call=123" in line
+    assert "call=9-456" in line
     assert "system=9" in line
     assert "talkgroup=456" in line
     assert "freq=851.012500MHz" in line

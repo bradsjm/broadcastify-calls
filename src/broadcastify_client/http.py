@@ -71,12 +71,18 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
 
         logger.debug("POST %s with %d form field(s)", url, len(data))
         try:
-            response = await self._client.post(url, data=data, headers=self._merge_headers(headers))
+            response = await self._client.post(
+                url,
+                data=data,
+                follow_redirects=False,
+                headers=self._merge_headers(headers),
+            )
         except httpx.HTTPError as exc:  # pragma: no cover - network failure path
             logger.error("HTTP POST to %s failed: %s", url, exc)
             raise TransportError(str(exc)) from exc
         try:
-            response.raise_for_status()
+            if not response.is_redirect:
+                response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             logger.error("HTTP POST to %s returned status %s", url, status)
@@ -102,13 +108,15 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
             response = await self._client.get(
                 url,
                 params=params,
+                follow_redirects=False,
                 headers=self._merge_headers(headers),
             )
         except httpx.HTTPError as exc:  # pragma: no cover - network failure path
             logger.error("HTTP GET %s failed: %s", url, exc)
             raise TransportError(str(exc)) from exc
         try:
-            response.raise_for_status()
+            if not response.is_redirect:
+                response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             logger.error("HTTP GET %s returned status %s", url, status)

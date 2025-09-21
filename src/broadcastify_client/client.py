@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
@@ -20,6 +20,7 @@ from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
 from .models import ArchiveResult, AudioChunkEvent, Call, CallEvent, SessionToken
+from .schemas import LiveCallEntry, LiveCallsResponse
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -161,46 +162,24 @@ class _HttpCallPoller(CallPoller):
         response = await self._http_client.post_form(self._LIVE_ENDPOINT, data=form_payload)
 
         try:
-            payload = cast(dict[str, Any], response.json())
+            payload = response.json()
         except ValueError as exc:  # pragma: no cover - defensive path
             raise LiveSessionError("Live call payload was not valid JSON") from exc
 
-        session_key = payload.get("sessionKey")
-        if isinstance(session_key, str) and session_key:
-            self._session_key = session_key
+        envelope = LiveCallsResponse.model_validate(payload)
+        if envelope.session_key:
+            self._session_key = envelope.session_key
 
-        events = self._parse_events(payload)
-        next_cursor = self._calculate_cursor(payload, events, position)
+        events = [self._to_call_event(entry) for entry in envelope.calls]
+        next_cursor = self._calculate_cursor(envelope, events, position)
         self._initialised = True
 
         self._telemetry.record_metric("live_producer.poll.events", float(len(events)))
         return events, next_cursor
 
-    def _parse_events(self, payload: Mapping[str, Any]) -> list[CallEvent]:
-        calls_payload = payload.get("calls", [])
-        if not isinstance(calls_payload, list):
-            raise LiveSessionError("Live call payload missing 'calls' array")
-
-        typed_calls = cast(list[Mapping[str, Any]], calls_payload)
-        events: list[CallEvent] = []
-        now = datetime.now(UTC)
-        for entry in typed_calls:
-            call = _parse_live_call(entry, self._system_id, self._talkgroup_id)
-            cursor = _coerce_optional_float(entry.get("pos") or entry.get("position"))
-            events.append(
-                CallEvent(
-                    call=call,
-                    cursor=cursor,
-                    received_at=now,
-                    shard_key=(self._system_id, self._talkgroup_id),
-                    raw_payload=MappingProxyType({str(key): value for key, value in entry.items()}),
-                )
-            )
-        return events
-
     def _calculate_cursor(
         self,
-        payload: Mapping[str, Any],
+        envelope: LiveCallsResponse,
         events: list[CallEvent],
         current: float,
     ) -> float | None:
@@ -210,15 +189,25 @@ class _HttpCallPoller(CallPoller):
                 candidates.append(float(event.cursor))
             candidates.append(event.call.received_at.timestamp() + 1.0)
 
-        last_pos = _coerce_optional_float(payload.get("lastPos") or payload.get("lastpos"))
-        if last_pos is not None:
-            candidates.append(last_pos)
-
+        candidates.append(float(envelope.last_pos))
         candidates.append(current)
 
         if not candidates:
             return current
         return max(candidates)
+
+    def _to_call_event(self, entry: LiveCallEntry) -> CallEvent:
+        call = _parse_live_call(entry)
+        cursor = entry.pos
+        now = datetime.now(UTC)
+        raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
+        return CallEvent(
+            call=call,
+            cursor=cursor,
+            received_at=now,
+            shard_key=(self._system_id, self._talkgroup_id),
+            raw_payload=raw_payload,
+        )
 
 
 class BroadcastifyClient(AsyncBroadcastifyClient):
@@ -424,9 +413,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                     await self._event_bus.publish(self._audio_topic, chunk)
                     await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
                 except Exception as exc:
-                    logger.exception(
-                        "Failed to dispatch audio chunk for call %s", chunk.call_id
-                    )
+                    logger.exception("Failed to dispatch audio chunk for call %s", chunk.call_id)
                     self._telemetry.record_event(
                         "audio_dispatch.error",
                         attributes={"error_type": exc.__class__.__name__},
@@ -480,100 +467,24 @@ def _generate_session_key() -> str:
     return secrets.token_hex(16)
 
 
-def _parse_live_call(
-    entry: Mapping[str, Any],
-    fallback_system_id: int,
-    fallback_talkgroup_id: int,
-) -> Call:
-    call_id = _coerce_int(entry.get("id") or entry.get("callId"), "id")
-    system_id = _coerce_optional_int(entry.get("system_id") or entry.get("systemId"))
-    talkgroup_id = _coerce_optional_int(entry.get("talkgroup_id") or entry.get("talkgroupId"))
-
-    resolved_system_id = system_id if system_id is not None else fallback_system_id
-    resolved_talkgroup_id = talkgroup_id if talkgroup_id is not None else fallback_talkgroup_id
-
-    received_at_value: Any = entry.get("received_at")
-    if received_at_value is None:
-        received_at_value = entry.get("start_time")
-    if received_at_value is None:
-        received_at_value = entry.get("start")
-    if received_at_value is None:
-        received_at_value = entry.get("timestamp")
-    if received_at_value is None:
-        raise LiveSessionError("Live call entry missing receipt timestamp")
-
-    frequency_hz = _coerce_optional_float(
-        entry.get("frequency_hz") or entry.get("call_freq") or entry.get("frequencyHz")
-    )
-    ttl_seconds = _coerce_optional_float(entry.get("call_ttl") or entry.get("ttl"))
-    metadata = _normalize_metadata(entry.get("metadata"))
-
+def _parse_live_call(entry: LiveCallEntry) -> Call:
+    metadata = _normalize_live_metadata(entry.metadata)
+    raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
     return Call(
-        call_id=call_id,
-        system_id=resolved_system_id,
-        talkgroup_id=resolved_talkgroup_id,
-        received_at=_parse_datetime(received_at_value),
-        frequency_hz=frequency_hz,
+        call_id=entry.id,
+        system_id=entry.system_id,
+        talkgroup_id=entry.call_tg,
+        received_at=datetime.fromtimestamp(entry.ts, UTC),
+        frequency_hz=entry.call_freq,
         metadata=metadata,
-        ttl_seconds=ttl_seconds,
-        raw=MappingProxyType({str(key): value for key, value in entry.items()}),
+        ttl_seconds=entry.call_ttl,
+        raw=raw_payload,
     )
 
 
-def _coerce_int(value: Any, field: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise LiveSessionError(f"Live call entry missing valid '{field}'") from exc
-
-
-def _coerce_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise LiveSessionError("Boolean cannot represent integer cursor")
-    if isinstance(value, (int, float, str)):
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise LiveSessionError(f"Invalid integer value: {value!r}") from exc
-    raise LiveSessionError(f"Unsupported integer value: {value!r}")
-
-
-def _coerce_optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise LiveSessionError("Boolean cannot represent float cursor")
-    if isinstance(value, (int, float, str)):
-        try:
-            return float(value)
-        except (TypeError, ValueError) as exc:
-            raise LiveSessionError(f"Invalid float value: {value!r}") from exc
-    raise LiveSessionError(f"Unsupported float value: {value!r}")
-
-
-def _parse_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=UTC)
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            try:
-                return datetime.fromtimestamp(float(value), tz=UTC)
-            except ValueError as exc:
-                raise LiveSessionError(f"Unsupported datetime value: {value!r}") from exc
-    raise LiveSessionError(f"Unsupported datetime value: {value!r}")
-
-
-def _normalize_metadata(value: Any) -> Mapping[str, str]:
+def _normalize_live_metadata(value: Mapping[str, Any] | None) -> Mapping[str, str]:
     if value is None:
         return MappingProxyType({})
-    if not isinstance(value, Mapping):
-        raise LiveSessionError("Call metadata must be a mapping")
-    typed_mapping = cast(Mapping[str, object], value)
-    normalized = {str(key): str(val) for key, val in typed_mapping.items()}
+    mapping = dict(value)
+    normalized = {str(key): str(val) for key, val in mapping.items()}
     return MappingProxyType(normalized)

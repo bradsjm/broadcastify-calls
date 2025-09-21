@@ -32,7 +32,7 @@ from broadcastify_client.telemetry import NullTelemetrySink, TelemetrySink
 TEST_USERNAME = "alice"
 TEST_CREDENTIAL_VALUE = "test-secret"
 EXPECTED_SESSION_VALUE = "token-alice"
-EXPECTED_CALL_ID = 9
+EXPECTED_CALL_ID = "1-2"
 
 
 class StubAuthenticationBackend:
@@ -118,7 +118,7 @@ class StubCallPollerFactory:
 
 class StubAudioDownloader:
     def __init__(self) -> None:
-        self.requests: list[int] = []
+        self.requests: list[str] = []
 
     async def fetch_audio(self, call: CallEvent) -> AsyncIterator[AudioChunkEvent]:
         self.requests.append(call.call.call_id)
@@ -160,7 +160,7 @@ async def test_authenticate_with_credentials_caches_token() -> None:
     archive_client_stub = StubArchiveClient(archive_result)
     archive_client = cast(ArchiveClient, archive_client_stub)
     base_call = Call(
-        call_id=1,
+        call_id="1-2",
         system_id=1,
         talkgroup_id=2,
         received_at=datetime.now(UTC),
@@ -213,7 +213,7 @@ async def test_get_archived_calls_uses_archive_client() -> None:
     archive_client_stub = StubArchiveClient(archive_result)
     archive_client = cast(ArchiveClient, archive_client_stub)
     call_instance = Call(
-        call_id=2,
+        call_id="3-4",
         system_id=3,
         talkgroup_id=4,
         received_at=datetime.now(UTC),
@@ -422,20 +422,24 @@ async def test_http_call_poller_parses_events() -> None:
     expected_cursor = 12.5
     next_cursor_value = 18.0
     call_entry: dict[str, object] = {
-        "id": 1,
-        "system_id": 1,
-        "talkgroup_id": 2,
-        "received_at": "1970-01-01T00:00:10+00:00",
-        "call_freq": expected_frequency,
+        "id": "1-2",
+        "systemId": 1,
+        "sid": 1,
+        "call_tg": 2,
         "metadata": {"foo": "bar"},
+        "call_freq": expected_frequency,
+        "call-ttl": 1758450000,
+        "ts": 10,
         "pos": expected_cursor,
     }
     first_payload: dict[str, object] = {
         "sessionKey": "server-session",
+        "serverTime": 20,
         "lastPos": expected_last_pos,
         "calls": [call_entry],
     }
     second_payload: dict[str, object] = {
+        "serverTime": 25,
         "lastPos": next_cursor_value,
         "calls": [],
     }
@@ -453,7 +457,7 @@ async def test_http_call_poller_parses_events() -> None:
     assert cursor == expected_last_pos
     assert len(events) == 1
     event = events[0]
-    assert event.call.call_id == 1
+    assert event.call.call_id == "1-2"
     assert event.call.frequency_hz == expected_frequency
     assert event.call.metadata["foo"] == "bar"
     assert event.cursor == expected_cursor
