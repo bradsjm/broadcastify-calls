@@ -7,7 +7,7 @@ import asyncio
 import logging
 import signal
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +17,7 @@ from .client import BroadcastifyClient
 from .config import Credentials, load_credentials_from_environment
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
-from .models import CallEvent
+from .models import CallMetadata, LiveCallEnvelope
 
 LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
@@ -42,7 +42,6 @@ class CliOptions:
 
 async def run_async(options: CliOptions) -> int:
     """Execute the CLI workflow and return the process exit code."""
-
     logging.basicConfig(
         level=options.log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -106,7 +105,6 @@ async def run_async(options: CliOptions) -> int:
 
 def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     """Parse command-line arguments into :class:`CliOptions`."""
-
     parser = argparse.ArgumentParser(
         prog="broadcastify_calls",
         description=(
@@ -167,9 +165,8 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     )
 
 
-def format_call_event(event: CallEvent, *, metadata_limit: int) -> str:
+def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
     """Return a single-line summary for *event* limited to *metadata_limit* entries."""
-
     call = event.call
     timestamp = _format_timestamp(call.received_at)
     frequency = _format_frequency(call.frequency_hz)
@@ -192,7 +189,6 @@ def format_call_event(event: CallEvent, *, metadata_limit: int) -> str:
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Entry point for the ``broadcastify_calls`` console script."""
-
     options = parse_cli_args(argv)
     try:
         exit_code = asyncio.run(run_async(options))
@@ -203,11 +199,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     """Return a coroutine callback that prints call events with limited metadata."""
-
     print_lock = asyncio.Lock()
 
     async def _printer(event: object) -> None:
-        if not isinstance(event, CallEvent):
+        if not isinstance(event, LiveCallEnvelope):
             return
         line = format_call_event(event, metadata_limit=metadata_limit)
         async with print_lock:
@@ -235,10 +230,22 @@ def _format_optional_float(value: float | None, *, suffix: str | None = None) ->
     return formatted
 
 
-def _format_metadata(metadata: Mapping[str, str], limit: int) -> str:
+def _format_metadata(metadata: CallMetadata, limit: int) -> str:
     if limit == 0:
         return ""
-    items = sorted(metadata.items(), key=lambda item: item[0])
+    items: list[tuple[str, str]] = []
+    if metadata.agency and metadata.agency.name:
+        items.append(("agency", metadata.agency.name))
+    if metadata.channel and metadata.channel.talkgroup_name:
+        items.append(("talkgroup_name", metadata.channel.talkgroup_name))
+    if metadata.channel and metadata.channel.service_tag:
+        items.append(("service_tag", metadata.channel.service_tag))
+    if metadata.location and metadata.location.city:
+        items.append(("city", metadata.location.city))
+    if metadata.playlist:
+        items.append(("playlist", metadata.playlist.name or metadata.playlist.playlist_id))
+    items.extend(sorted(metadata.extras.items(), key=lambda item: item[0]))
+    items = sorted(items, key=lambda item: item[0])
     if limit > 0:
         items = items[:limit]
     return ",".join(f"{key}={value}" for key, value in items)

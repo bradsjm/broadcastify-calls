@@ -5,13 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from secrets import SystemRandom
 from typing import Protocol
 
 from .config import LiveProducerConfig
 from .errors import BroadcastifyError, LiveSessionError
-from .models import CallEvent
-from .telemetry import NullTelemetrySink, TelemetrySink
+from .models import LiveCallEnvelope, ProducerRuntimeState
+from .telemetry import (
+    LivePollErrorEvent,
+    NullTelemetrySink,
+    PollMetrics,
+    QueueDepthGauge,
+    TelemetrySink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +28,8 @@ class CallPoller(Protocol):
 
     async def fetch(
         self, *, cursor: float | None
-    ) -> tuple[Iterable[CallEvent], float | None]:  # pragma: no cover - protocol
+    ) -> tuple[Iterable[LiveCallEnvelope], float | None]:  # pragma: no cover - protocol
         """Return new call events and the next cursor to persist."""
-
         ...
 
 
@@ -35,13 +41,14 @@ class LiveCallProducer:
         poller: CallPoller,
         config: LiveProducerConfig,
         *,
+        topic: str,
         telemetry: TelemetrySink | None = None,
-        queue: asyncio.Queue[CallEvent] | None = None,
+        queue: asyncio.Queue[LiveCallEnvelope] | None = None,
     ) -> None:
         """Create a producer using *poller* and *config*."""
-
         self._poller = poller
         self._config = config
+        self._topic = topic
         self._telemetry = telemetry or NullTelemetrySink()
         maxsize = 0 if config.queue_maxsize == 0 else int(config.queue_maxsize)
         self._queue = queue or asyncio.Queue(maxsize=maxsize)
@@ -53,29 +60,40 @@ class LiveCallProducer:
             else None
         )
         self._metrics_interval = config.metrics_interval
+        self._last_poll_started_at: datetime | None = None
+        self._last_poll_completed_at: datetime | None = None
+        self._last_event_at: datetime | None = None
+        self._consecutive_failures = 0
+        self._rate_limited_last = False
 
     @property
-    def queue(self) -> asyncio.Queue[CallEvent]:
+    def queue(self) -> asyncio.Queue[LiveCallEnvelope]:
         """Return the queue onto which call events are published."""
-
         return self._queue
+
+    @property
+    def cursor(self) -> float | None:
+        """Return the last cursor observed by the producer."""
+        return self._cursor
 
     async def run(self) -> None:
         """Continuously poll for call events until stopped."""
-
         loop = asyncio.get_running_loop()
         last_metrics_emit = loop.time()
         backoff = self._config.initial_backoff
         consecutive_failures = 0
 
         while not self._stopped.is_set():
+            rate_limited = False
             if self._rate_limiter is not None:
-                await self._rate_limiter.acquire()
+                rate_limited = await self._rate_limiter.acquire()
 
             try:
+                self._last_poll_started_at = datetime.now(UTC)
                 events, next_cursor = await self._poller.fetch(cursor=self._cursor)
             except BroadcastifyError as exc:
                 consecutive_failures += 1
+                self._consecutive_failures = consecutive_failures
                 logger.warning(
                     "Live poll failed for cursor %s (attempt %s): %s",
                     self._cursor,
@@ -83,11 +101,12 @@ class LiveCallProducer:
                     exc,
                 )
                 self._telemetry.record_event(
-                    "live_producer.poll.error",
-                    attributes={
-                        "error_type": exc.__class__.__name__,
-                        "attempt": consecutive_failures,
-                    },
+                    LivePollErrorEvent(
+                        cursor=self._cursor,
+                        attempt=consecutive_failures,
+                        error_type=exc.__class__.__name__,
+                        message=str(exc),
+                    )
                 )
                 if (
                     self._config.max_retry_attempts is not None
@@ -100,12 +119,17 @@ class LiveCallProducer:
             except Exception as exc:  # pragma: no cover - defensive path
                 logger.exception("Unexpected failure while fetching live calls")
                 self._telemetry.record_event(
-                    "live_producer.poll.error",
-                    attributes={"error_type": exc.__class__.__name__},
+                    LivePollErrorEvent(
+                        cursor=self._cursor,
+                        attempt=consecutive_failures + 1,
+                        error_type=exc.__class__.__name__,
+                        message=str(exc),
+                    )
                 )
                 raise LiveSessionError("Unexpected failure in live poller") from exc
 
             consecutive_failures = 0
+            self._consecutive_failures = 0
             backoff = self._config.initial_backoff
 
             dispatched = 0
@@ -113,8 +137,20 @@ class LiveCallProducer:
                 for event in events:
                     dispatched += 1
                     task_group.create_task(self._queue.put(event))
+                    self._last_event_at = event.received_at
 
-            self._telemetry.record_metric("live_producer.dispatched", float(dispatched))
+            self._last_poll_completed_at = datetime.now(UTC)
+            self._rate_limited_last = rate_limited
+            self._telemetry.record_metric(
+                PollMetrics(
+                    topic=self._topic,
+                    dispatched=dispatched,
+                    queue_depth=self._queue.qsize(),
+                    poll_started_at=self._last_poll_started_at,
+                    poll_completed_at=self._last_poll_completed_at,
+                    rate_limited=rate_limited,
+                )
+            )
             logger.debug("Dispatched %s call event(s) for queue", dispatched)
             if next_cursor is not None:
                 self._cursor = next_cursor
@@ -122,8 +158,7 @@ class LiveCallProducer:
             now = loop.time()
             if self._metrics_interval > 0 and (now - last_metrics_emit) >= self._metrics_interval:
                 self._telemetry.record_metric(
-                    "live_producer.queue_depth",
-                    float(self._queue.qsize()),
+                    QueueDepthGauge(topic=self._topic, depth=self._queue.qsize())
                 )
                 last_metrics_emit = now
 
@@ -134,9 +169,19 @@ class LiveCallProducer:
 
     async def stop(self) -> None:
         """Request termination of the producer loop."""
-
         self._stopped.set()
         logger.info("LiveCallProducer received stop request")
+
+    def snapshot(self) -> ProducerRuntimeState:
+        """Return a runtime snapshot of the producer state."""
+        return ProducerRuntimeState(
+            topic=self._topic,
+            queue_depth=self._queue.qsize(),
+            cursor=self._cursor,
+            last_event_at=self._last_event_at,
+            consecutive_failures=self._consecutive_failures,
+            rate_limited=self._rate_limited_last,
+        )
 
 
 def _jittered_interval(poll_interval: float, jitter_ratio: float) -> float:
@@ -153,16 +198,19 @@ class _RateLimiter:
         self._min_interval = 60.0 / float(rate_per_minute)
         self._last_acquire: float | None = None
 
-    async def acquire(self) -> None:
+    async def acquire(self) -> bool:
         if self._min_interval <= 0:
-            return
+            return False
         loop = asyncio.get_running_loop()
         now = loop.time()
+        waited = False
         if self._last_acquire is not None:
             wait_for = self._min_interval - (now - self._last_acquire)
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
+                waited = True
         self._last_acquire = loop.time()
+        return waited
 
 
 _JITTER_RANDOM = SystemRandom()

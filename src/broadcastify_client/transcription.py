@@ -20,14 +20,12 @@ class TranscriptionBackend(Protocol):
         self, audio_stream: AsyncIterator[AudioChunkEvent]
     ) -> AsyncIterator[TranscriptionPartial]:  # pragma: no cover - protocol
         """Yield partial transcriptions for the provided audio stream."""
-
         ...
 
     async def finalize(
         self, audio_stream: AsyncIterator[AudioChunkEvent]
     ) -> TranscriptionResult:  # pragma: no cover - protocol
         """Return the final transcription result for the provided audio stream."""
-
         ...
 
 
@@ -41,7 +39,6 @@ class TranscriptionPipeline:
         telemetry: TelemetrySink | None = None,
     ) -> None:
         """Initialise the pipeline with a transcription *backend*."""
-
         self._backend = backend
         self._telemetry = telemetry or NullTelemetrySink()
 
@@ -49,7 +46,6 @@ class TranscriptionPipeline:
         self, audio_stream: AsyncIterator[AudioChunkEvent]
     ) -> AsyncIterator[TranscriptionPartial]:
         """Yield transcription partials for *audio_stream*."""
-
         try:
             logger.debug("Starting streaming transcription")
             partial_stream = await self._backend.stream_transcription(audio_stream)
@@ -66,7 +62,6 @@ class TranscriptionPipeline:
         self, audio_stream: AsyncIterator[AudioChunkEvent]
     ) -> TranscriptionResult:
         """Return the final transcription result for *audio_stream*."""
-
         try:
             logger.debug("Starting final transcription")
             return await self._backend.finalize(audio_stream)

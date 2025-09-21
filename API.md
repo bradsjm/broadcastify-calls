@@ -126,7 +126,7 @@ broadcastify_client/
   | `sessionKey` | string | Yes | Random token per session. |
 - **Cursor Management:** Producer maintains `position = max(last_call.start_time + 1, response.lastPos or position)`.
 - **Polling Loop:**
-  - Implemented as `async def run(self, queue: Queue[CallEvent])`.
+  - Implemented as `async def run(self, queue: Queue[LiveCallEnvelope])`.
   - Supports configurable poll interval and jitter; on failure, uses exponential backoff with retry budgets.
 
 #### Producer Configuration
@@ -157,12 +157,12 @@ class LiveProducerConfig:
 
 ```python
 @dataclass(frozen=True)
-class CallEvent:
+class LiveCallEnvelope:
     call: Call
     cursor: Optional[float]
     received_at: datetime
     shard_key: tuple[int, int]  # (systemId, talkgroupId)
-    raw_payload: Mapping[str, Any]
+    raw_payload: Mapping[str, object]
 ```
 
 - Events are enqueued onto `asyncio.Queue` (size configurable). Back-pressure is applied via queue size; when full, producer pauses until consumers drain items.
@@ -171,7 +171,7 @@ class CallEvent:
 
 ### 3.4 Audio Pipeline (Consumer)
 
-- `AudioConsumer` subscribes to `CallEvent` queue, downloads MP3 via async streaming (`httpx.AsyncClient.stream()` or equivalent) with spoof headers.
+- `AudioConsumer` subscribes to `LiveCallEnvelope` queue, downloads MP3 via async streaming (`httpx.AsyncClient.stream()` or equivalent) with spoof headers.
 - Emits `AudioChunkEvent` objects containing call metadata plus streamed bytes, enabling multiple downstream consumers.
 - Supports retry policy, bandwidth throttling, and optional deduplication via persistent store.
 - The client republishes chunks on `calls.audio` and per-call channels `calls.audio.{callId}`, mirroring the live-call topic topology for downstream consumers (transcription, storage, analytics).
@@ -240,7 +240,7 @@ class TranscriptionResult:
 ## 4. Data Models (Summary)
 
 - `Call`: typed mapping of Broadcastify call payload including extended fields (`call_freq`, `call-ttl`, `metadata`, etc.), storing unknown keys in immutable `raw` mapping.
-- `SessionToken`, `TimeWindow`, `ArchiveResult`, `CallEvent`, `AudioChunkEvent`, `TranscriptionPartial`, `TranscriptionResult` as defined above.
+- `SessionToken`, `TimeWindow`, `ArchiveResult`, `LiveCallEnvelope`, `AudioChunkEvent`, `TranscriptionPartial`, `TranscriptionResult` as defined above.
 - Enumerations for error kinds and provider identifiers.
 
 ## 5. Public Facade (Async-First Interface)

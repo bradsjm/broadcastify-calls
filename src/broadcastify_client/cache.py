@@ -18,12 +18,10 @@ class CacheBackend(Protocol[KeyT_contra, ValueT]):
 
     async def get(self, key: KeyT_contra) -> ValueT | None:  # pragma: no cover - protocol
         """Return a cached value for *key* if present."""
-
         ...
 
     async def set(self, key: KeyT_contra, value: ValueT) -> None:  # pragma: no cover - protocol
         """Store *value* for *key* in the cache."""
-
         ...
 
 
@@ -40,13 +38,11 @@ class InMemoryCache(CacheBackend[KeyT_contra, ValueT]):
 
     def __init__(self, config: CacheConfig | None = None) -> None:
         """Create an in-memory cache with optional *config*."""
-
         self._config = config or CacheConfig()
         self._store: dict[KeyT_contra, _CacheEntry[ValueT]] = {}
 
     async def get(self, key: KeyT_contra) -> ValueT | None:
         """Return the cached value when it has not expired."""
-
         entry = self._store.get(key)
         if entry is None:
             return None
@@ -57,7 +53,6 @@ class InMemoryCache(CacheBackend[KeyT_contra, ValueT]):
 
     async def set(self, key: KeyT_contra, value: ValueT) -> None:
         """Store *value* in the cache honoring the configured TTL."""
-
         ttl = self._config.ttl
         if ttl.total_seconds() <= 0:
             raise CacheError("Cache TTL must be positive")

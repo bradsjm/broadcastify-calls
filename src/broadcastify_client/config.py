@@ -128,8 +128,8 @@ def load_credentials_from_environment(
 
     Raises:
         ValueError: If the required keys cannot be resolved.
-    """
 
+    """
     resolved_env = dict(env or os.environ)
     if "LOGIN" not in resolved_env or "PASSWORD" not in resolved_env:
         path = Path(dotenv_path) if dotenv_path is not None else Path.cwd() / ".env"
@@ -146,7 +146,6 @@ def load_credentials_from_environment(
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
     """Parse *path* as a dotenv file and return key/value pairs."""
-
     variables: dict[str, str] = {}
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()

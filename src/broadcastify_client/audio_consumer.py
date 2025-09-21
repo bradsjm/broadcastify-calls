@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from .errors import AudioDownloadError
-from .models import AudioChunkEvent, CallEvent
+from .models import AudioChunkEvent, LiveCallEnvelope
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -18,10 +18,9 @@ class AudioDownloader(Protocol):
     """Protocol describing the interface for downloading audio chunks."""
 
     async def fetch_audio(
-        self, call: CallEvent
+        self, call: LiveCallEnvelope
     ) -> AsyncIterator[AudioChunkEvent]:  # pragma: no cover - protocol
         """Yield audio chunks for *call*."""
-
         ...
 
 
@@ -35,13 +34,13 @@ class AudioConsumer:
         telemetry: TelemetrySink | None = None,
     ) -> None:
         """Create an AudioConsumer backed by *downloader*."""
-
         self._downloader = downloader
         self._telemetry = telemetry or NullTelemetrySink()
 
-    async def consume(self, call_event: CallEvent, queue: asyncio.Queue[AudioChunkEvent]) -> None:
+    async def consume(
+        self, call_event: LiveCallEnvelope, queue: asyncio.Queue[AudioChunkEvent]
+    ) -> None:
         """Download audio for *call_event* and enqueue resulting chunks."""
-
         logger.debug(
             "Starting audio download for call %s (system %s, talkgroup %s)",
             call_event.call.call_id,

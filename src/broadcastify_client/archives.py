@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Protocol
 
 import httpx
 
@@ -14,7 +13,8 @@ from .cache import CacheBackend, InMemoryCache
 from .config import CacheConfig
 from .errors import ResponseParsingError
 from .http import AsyncHttpClientProtocol
-from .models import ArchiveResult, Call, TimeWindow
+from .metadata import parse_call_metadata
+from .models import ArchiveCallEnvelope, ArchiveResult, Call, TimeWindow
 from .schemas import ArchiveCallEntry, ArchiveCallsResponse
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,6 @@ class ArchiveParser(Protocol):
 
     def parse(self, response: httpx.Response) -> ArchiveResult:  # pragma: no cover - protocol
         """Convert *response* into an ArchiveResult."""
-
         ...
 
 
@@ -41,7 +40,6 @@ class ArchiveClient:
         cache_config: CacheConfig | None = None,
     ) -> None:
         """Create an archive client using *http_client* and *parser*."""
-
         self._http_client = http_client
         self._parser = parser
         self._cache = cache or InMemoryCache(cache_config)
@@ -50,7 +48,6 @@ class ArchiveClient:
         self, system_id: int, talkgroup_id: int, time_block: int
     ) -> ArchiveResult:
         """Return archived calls for the provided identifiers."""
-
         key = (system_id, talkgroup_id, time_block)
         cached = await self._cache.get(key)
         if cached is not None:
@@ -89,21 +86,20 @@ class JsonArchiveParser(ArchiveParser):
 
     def parse(self, response: httpx.Response) -> ArchiveResult:
         """Parse an HTTP JSON response into an ArchiveResult."""
-
         try:
             payload = response.json()
         except ValueError as exc:  # pragma: no cover - defensive path
             raise ResponseParsingError("Archive payload is not valid JSON") from exc
 
         envelope = ArchiveCallsResponse.model_validate(payload)
-        calls = [self._to_domain_call(item) for item in envelope.calls]
+        fetched_at = datetime.now(UTC)
+        calls = [self._to_envelope(item, fetched_at) for item in envelope.calls]
 
         window = TimeWindow(
             start=datetime.fromtimestamp(envelope.start, UTC),
             end=datetime.fromtimestamp(envelope.end, UTC),
         )
 
-        fetched_at = datetime.now(UTC)
         typed_payload = MappingProxyType(envelope.model_dump(by_alias=True))
         return ArchiveResult(
             calls=calls,
@@ -113,24 +109,18 @@ class JsonArchiveParser(ArchiveParser):
             raw=typed_payload,
         )
 
-    def _to_domain_call(self, entry: ArchiveCallEntry) -> Call:
-        metadata_mapping = _normalize_metadata(entry.metadata)
-        raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
-        return Call(
+    def _to_envelope(
+        self, entry: ArchiveCallEntry, retrieved_at: datetime
+    ) -> ArchiveCallEnvelope:
+        metadata = parse_call_metadata(entry.metadata)
+        call = Call(
             call_id=entry.id,
             system_id=entry.system_id,
             talkgroup_id=entry.call_tg,
             received_at=datetime.fromtimestamp(entry.ts, UTC),
             frequency_hz=entry.call_freq,
-            metadata=metadata_mapping,
+            metadata=metadata,
             ttl_seconds=entry.call_ttl,
-            raw=raw_payload,
         )
-
-
-def _normalize_metadata(value: Mapping[str, Any] | None) -> Mapping[str, str]:
-    if value is None:
-        return MappingProxyType({})
-    mapping = dict(value)
-    normalized = {str(key): str(val) for key, val in mapping.items()}
-    return MappingProxyType(normalized)
+        raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
+        return ArchiveCallEnvelope(call=call, retrieved_at=retrieved_at, raw_payload=raw_payload)

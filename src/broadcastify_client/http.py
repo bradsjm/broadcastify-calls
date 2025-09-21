@@ -25,7 +25,6 @@ class AsyncHttpClientProtocol(Protocol):
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:  # pragma: no cover - protocol signature
         """Send a form-encoded POST request and return the HTTP response."""
-
         ...
 
     async def get(
@@ -36,12 +35,10 @@ class AsyncHttpClientProtocol(Protocol):
         params: Mapping[str, Any] | None = None,
     ) -> httpx.Response:  # pragma: no cover - protocol signature
         """Send a GET request and return the HTTP response."""
-
         ...
 
     async def close(self) -> None:  # pragma: no cover - protocol signature
         """Release HTTP resources and close underlying connections."""
-
         ...
 
 
@@ -50,7 +47,6 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
 
     def __init__(self, config: HttpClientConfig | None = None) -> None:
         """Initialise the HTTP client with optional *config*."""
-
         self._config = config or HttpClientConfig()
         limits = httpx.Limits(max_connections=self._config.max_connections or None)
         self._client = httpx.AsyncClient(
@@ -68,7 +64,6 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         """Send a form-encoded POST request with browser-mimicking headers."""
-
         logger.debug("POST %s with %d form field(s)", url, len(data))
         try:
             response = await self._client.post(
@@ -102,7 +97,6 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
         params: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
         """Send a GET request respecting connection pooling and compression settings."""
-
         logger.debug("GET %s with params=%s", url, None if params is None else list(params.keys()))
         try:
             response = await self._client.get(
@@ -130,13 +124,11 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
 
     async def close(self) -> None:
         """Close the underlying httpx.AsyncClient instance."""
-
         await self._client.aclose()
         logger.debug("httpx.AsyncClient closed for base URL %s", self._client.base_url)
 
     def _merge_headers(self, headers: Mapping[str, str] | None) -> MutableMapping[str, str]:
         """Merge default headers with user-provided *headers*."""
-
         merged: MutableMapping[str, str] = dict(self._client.headers)
         if headers:
             merged.update(headers)
@@ -144,7 +136,6 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
 
     def _build_default_headers(self) -> MutableMapping[str, str]:
         """Return the default header set applied to every request."""
-
         return {
             "User-Agent": self._config.user_agent,
             "Accept": (

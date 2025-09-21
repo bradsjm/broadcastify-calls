@@ -18,10 +18,10 @@ src/broadcastify_client/errors.py
 src/broadcastify_client/eventbus.py
 src/broadcastify_client/http.py
 src/broadcastify_client/live_producer.py
+src/broadcastify_client/metadata.py
 src/broadcastify_client/models.py
 src/broadcastify_client/py.typed
+src/broadcastify_client/schemas.py
 src/broadcastify_client/telemetry.py
 src/broadcastify_client/transcription.py
-tests/test_cli.py
 tests/test_client.py
-tests/test_config.py

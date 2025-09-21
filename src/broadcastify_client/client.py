@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Protocol
+from uuid import uuid4
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
@@ -19,11 +20,111 @@ from .errors import AudioDownloadError, LiveSessionError
 from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
-from .models import ArchiveResult, AudioChunkEvent, Call, CallEvent, SessionToken
+from .metadata import parse_call_metadata
+from .models import (
+    ArchiveResult,
+    AudioChunkEvent,
+    Call,
+    LiveCallEnvelope,
+    PlaylistDescriptor,
+    PlaylistId,
+    PlaylistSubscriptionState,
+    ProducerRuntimeState,
+    RuntimeMetrics,
+    SearchResultPage,
+    SessionToken,
+    SystemSummary,
+    TalkgroupSummary,
+)
 from .schemas import LiveCallEntry, LiveCallsResponse
-from .telemetry import NullTelemetrySink, TelemetrySink
+from .telemetry import (
+    AudioErrorEvent,
+    LiveDispatchErrorEvent,
+    NullTelemetrySink,
+    PollMetrics,
+    TelemetrySink,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TalkgroupSubscription:
+    """Subscription descriptor targeting a single talkgroup."""
+
+    system_id: int
+    talkgroup_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistSubscription:
+    """Subscription descriptor targeting a playlist feed."""
+
+    playlist_id: PlaylistId
+
+
+Subscription = TalkgroupSubscription | PlaylistSubscription
+
+
+@dataclass(slots=True)
+class LiveSubscriptionHandle:
+    """Public handle for a live subscription."""
+
+    id: str
+    topic: str
+    subscription: Subscription
+    _stop: Callable[[str], Awaitable[None]] = field(repr=False)
+    _snapshot: Callable[[str], ProducerRuntimeState] = field(repr=False)
+
+    async def close(self) -> None:
+        """Stop the underlying producer."""
+        await self._stop(self.id)
+
+    def snapshot(self) -> ProducerRuntimeState:
+        """Return the latest runtime snapshot for this subscription."""
+        return self._snapshot(self.id)
+
+
+class PlaylistCatalog(Protocol):
+    """Protocol describing playlist discovery and metadata APIs."""
+
+    async def list_playlists(self) -> Sequence[PlaylistDescriptor]:  # pragma: no cover - protocol
+        """Return all playlists visible to the current Broadcastify account."""
+        ...
+
+    async def describe_playlist(
+        self, playlist_id: PlaylistId
+    ) -> PlaylistSubscriptionState:  # pragma: no cover - protocol
+        """Return subscription metadata for the given `playlist_id`."""
+        ...
+
+    async def search_playlists(
+        self, query: str, *, limit: int
+    ) -> SearchResultPage[PlaylistDescriptor]:  # pragma: no cover - protocol
+        """Search playlists by `query`, returning at most `limit` results."""
+        ...
+
+
+class DiscoveryService(Protocol):
+    """Protocol describing search and resolution APIs for systems and talkgroups."""
+
+    async def search_systems(
+        self, query: str, *, limit: int
+    ) -> SearchResultPage[SystemSummary]:  # pragma: no cover - protocol
+        """Return system summaries matching `query` constrained by `limit`."""
+        ...
+
+    async def search_talkgroups(
+        self, query: str, *, limit: int
+    ) -> SearchResultPage[TalkgroupSummary]:  # pragma: no cover - protocol
+        """Return talkgroups matching `query` constrained by `limit`."""
+        ...
+
+    async def resolve_talkgroup(
+        self, name: str, region: str
+    ) -> TalkgroupSummary | None:  # pragma: no cover - protocol
+        """Resolve a talkgroup for `name` within `region`, if available."""
+        ...
 
 
 class AsyncBroadcastifyClient(Protocol):
@@ -32,44 +133,97 @@ class AsyncBroadcastifyClient(Protocol):
     async def authenticate(
         self, credentials: Credentials | SessionToken
     ) -> SessionToken:  # pragma: no cover - protocol
-        """Authenticate using *credentials* or validate an existing token."""
-
+        """Authenticate using explicit credentials or an existing session token."""
         ...
 
     async def logout(self) -> None:  # pragma: no cover - protocol
-        """Invalidate the active session."""
-
+        """Invalidate any active session for this client."""
         ...
 
     async def get_archived_calls(
         self, system_id: int, talkgroup_id: int, time_block: int
     ) -> ArchiveResult:  # pragma: no cover - protocol
-        """Return archived calls for the provided identifiers."""
-
+        """Fetch archived calls for the specified identifiers and time block."""
         ...
 
     async def create_live_producer(
         self, system_id: int, talkgroup_id: int, *, position: float | None = None
-    ) -> LiveCallProducer:  # pragma: no cover - protocol
-        """Create a live call producer for the given talkgroup."""
+    ) -> LiveSubscriptionHandle:  # pragma: no cover - protocol
+        """Start a talkgroup live producer and return the tracking handle."""
+        ...
 
+    async def create_playlist_producer(
+        self, playlist_id: PlaylistId, *, position: float | None = None
+    ) -> LiveSubscriptionHandle:  # pragma: no cover - protocol
+        """Start a playlist live producer and return the tracking handle."""
         ...
 
     async def register_consumer(
         self, topic: str, callback: ConsumerCallback
     ) -> None:  # pragma: no cover - protocol
-        """Register a consumer callback for a topic."""
+        """Subscribe `callback` to events published on `topic`."""
+        ...
 
+    async def unregister_consumer(
+        self, topic: str, callback: ConsumerCallback
+    ) -> None:  # pragma: no cover - protocol
+        """Remove `callback` subscription from `topic` if registered."""
+        ...
+
+    async def stop_producer(
+        self, handle: LiveSubscriptionHandle
+    ) -> None:  # pragma: no cover - protocol
+        """Stop the producer identified by `handle`."""
+        ...
+
+    async def list_topics(self) -> Mapping[str, int]:  # pragma: no cover - protocol
+        """Return known event topics and their subscriber counts."""
+        ...
+
+    async def get_runtime_metrics(self) -> RuntimeMetrics:  # pragma: no cover - protocol
+        """Return current client runtime metrics."""
         ...
 
     async def start(self) -> None:  # pragma: no cover - protocol
-        """Start all managed producers and consumers."""
-
+        """Initialise background tasks required for the client."""
         ...
 
     async def shutdown(self) -> None:  # pragma: no cover - protocol
-        """Stop producers, consumers, and release resources."""
+        """Stop background tasks and release held resources."""
+        ...
 
+    async def list_playlists(self) -> Sequence[PlaylistDescriptor]:  # pragma: no cover - protocol
+        """Return all playlists visible to the current Broadcastify account."""
+        ...
+
+    async def describe_playlist(
+        self, playlist_id: PlaylistId
+    ) -> PlaylistSubscriptionState:  # pragma: no cover - protocol
+        """Return subscription metadata for the given `playlist_id`."""
+        ...
+
+    async def search_playlists(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[PlaylistDescriptor]:  # pragma: no cover - protocol
+        """Search playlists by `query`, returning at most `limit` results."""
+        ...
+
+    async def search_systems(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[SystemSummary]:  # pragma: no cover - protocol
+        """Return system summaries matching `query` constrained by `limit`."""
+        ...
+
+    async def search_talkgroups(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[TalkgroupSummary]:  # pragma: no cover - protocol
+        """Return talkgroups matching `query` constrained by `limit`."""
+        ...
+
+    async def resolve_talkgroup(
+        self, name: str, region: str
+    ) -> TalkgroupSummary | None:  # pragma: no cover - protocol
+        """Resolve a talkgroup for `name` within `region`, if available."""
         ...
 
 
@@ -78,28 +232,27 @@ class CallPollerFactory(Protocol):
 
     def create(
         self,
-        system_id: int,
-        talkgroup_id: int,
+        subscription: Subscription,
         *,
         http_client: AsyncHttpClientProtocol,
         telemetry: TelemetrySink,
     ) -> CallPoller:  # pragma: no cover - factory protocol
-        """Return a call poller for the given identifiers."""
-
+        """Construct a call poller bound to `subscription` using provided dependencies."""
         ...
 
 
 def _create_task_set() -> set[asyncio.Task[None]]:
     """Return a new empty set for tracking asyncio tasks."""
-
     return set()
 
 
 @dataclass
 class ProducerHandle:
-    """Tracks the association between a producer, its queue, and execution tasks."""
+    """Tracks an active producer, its subscription, and execution tasks."""
 
+    id: str
     producer: LiveCallProducer
+    subscription: Subscription
     topic: str
     task: asyncio.Task[None] | None = None
     dispatch_task: asyncio.Task[None] | None = None
@@ -123,91 +276,8 @@ class BroadcastifyClientDependencies:
     telemetry: TelemetrySink | None = None
     call_poller_factory: CallPollerFactory | None = None
     audio_consumer_factory: Callable[[], AudioConsumer] | None = None
-
-
-class _HttpCallPoller(CallPoller):
-    """HTTP-backed poller that surfaces Broadcastify live call events."""
-
-    _LIVE_ENDPOINT = "/calls/apis/live-calls"
-
-    def __init__(
-        self,
-        system_id: int,
-        talkgroup_id: int,
-        http_client: AsyncHttpClientProtocol,
-        telemetry: TelemetrySink,
-    ) -> None:
-        """Create a poller for *system_id* and *talkgroup_id*."""
-
-        self._system_id = system_id
-        self._talkgroup_id = talkgroup_id
-        self._http_client = http_client
-        self._telemetry = telemetry
-        self._session_key = _generate_session_key()
-        self._initialised = False
-
-    async def fetch(self, *, cursor: float | None) -> tuple[list[CallEvent], float | None]:
-        """Return new call events and the updated cursor."""
-
-        position = float(cursor) if cursor is not None else 0.0
-        form_payload = {
-            "groups[]": f"{self._system_id}-{self._talkgroup_id}",
-            "pos": f"{position:.3f}",
-            "doInit": "1" if not self._initialised else "0",
-            "systemId": "0",
-            "sid": "0",
-            "sessionKey": self._session_key,
-        }
-
-        response = await self._http_client.post_form(self._LIVE_ENDPOINT, data=form_payload)
-
-        try:
-            payload = response.json()
-        except ValueError as exc:  # pragma: no cover - defensive path
-            raise LiveSessionError("Live call payload was not valid JSON") from exc
-
-        envelope = LiveCallsResponse.model_validate(payload)
-        if envelope.session_key:
-            self._session_key = envelope.session_key
-
-        events = [self._to_call_event(entry) for entry in envelope.calls]
-        next_cursor = self._calculate_cursor(envelope, events, position)
-        self._initialised = True
-
-        self._telemetry.record_metric("live_producer.poll.events", float(len(events)))
-        return events, next_cursor
-
-    def _calculate_cursor(
-        self,
-        envelope: LiveCallsResponse,
-        events: list[CallEvent],
-        current: float,
-    ) -> float | None:
-        candidates: list[float] = []
-        for event in events:
-            if event.cursor is not None:
-                candidates.append(float(event.cursor))
-            candidates.append(event.call.received_at.timestamp() + 1.0)
-
-        candidates.append(float(envelope.last_pos))
-        candidates.append(current)
-
-        if not candidates:
-            return current
-        return max(candidates)
-
-    def _to_call_event(self, entry: LiveCallEntry) -> CallEvent:
-        call = _parse_live_call(entry)
-        cursor = entry.pos
-        now = datetime.now(UTC)
-        raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
-        return CallEvent(
-            call=call,
-            cursor=cursor,
-            received_at=now,
-            shard_key=(self._system_id, self._talkgroup_id),
-            raw_payload=raw_payload,
-        )
+    playlist_catalog: PlaylistCatalog | None = None
+    discovery_client: DiscoveryService | None = None
 
 
 class BroadcastifyClient(AsyncBroadcastifyClient):
@@ -218,8 +288,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         *,
         dependencies: BroadcastifyClientDependencies | None = None,
     ) -> None:
-        """Create a Broadcastify client using optional dependency overrides."""
-
+        """Wire optional dependency overrides and prepare internal state."""
         deps = dependencies or BroadcastifyClientDependencies()
         self._telemetry = deps.telemetry or NullTelemetrySink()
         self._http_config = deps.http_config or HttpClientConfig()
@@ -233,111 +302,215 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._event_bus = deps.event_bus or EventBus()
         self._call_poller_factory = deps.call_poller_factory or _DefaultCallPollerFactory()
         self._audio_consumer_factory = deps.audio_consumer_factory
-        self._producer_handles: list[ProducerHandle] = []
+        self._playlist_catalog = deps.playlist_catalog
+        self._discovery_client = deps.discovery_client
+        self._producer_handles: dict[str, ProducerHandle] = {}
+        self._handles_lock = asyncio.Lock()
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
-        logger.debug(
-            "BroadcastifyClient initialised with %d pre-registered producers",
-            len(self._producer_handles),
-        )
+        logger.debug("BroadcastifyClient initialised")
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
-        """Authenticate using credentials or validate the provided session token."""
-
+        """Authenticate against Broadcastify and return a validated session token."""
         return await self._authenticator.authenticate(credentials)
 
     async def logout(self) -> None:
-        """Log out of Broadcastify and clear the active session."""
-
+        """Invalidate the active Broadcastify session if one exists."""
         await self._authenticator.logout()
 
     async def get_archived_calls(
         self, system_id: int, talkgroup_id: int, time_block: int
     ) -> ArchiveResult:
-        """Return archived calls for the given identifiers."""
-
+        """Retrieve archived calls for the given system, talkgroup, and archive block."""
         return await self._archive_client.get_archived_calls(system_id, talkgroup_id, time_block)
 
     async def create_live_producer(
         self, system_id: int, talkgroup_id: int, *, position: float | None = None
-    ) -> LiveCallProducer:
-        """Create and register a live call producer."""
+    ) -> LiveSubscriptionHandle:
+        """Create a talkgroup-based live producer and return a handle for managing it."""
+        subscription = TalkgroupSubscription(system_id=system_id, talkgroup_id=talkgroup_id)
+        return await self._register_subscription(subscription, position=position)
 
+    async def create_playlist_producer(
+        self, playlist_id: PlaylistId, *, position: float | None = None
+    ) -> LiveSubscriptionHandle:
+        """Create a playlist-driven live producer and return a handle for managing it."""
+        subscription = PlaylistSubscription(playlist_id=playlist_id)
+        return await self._register_subscription(subscription, position=position)
+
+    async def register_consumer(self, topic: str, callback: ConsumerCallback) -> None:
+        """Subscribe *callback* to receive events published on *topic*."""
+        await self._event_bus.subscribe(topic, callback)
+        logger.debug("Registered consumer for topic %s", topic)
+
+    async def unregister_consumer(self, topic: str, callback: ConsumerCallback) -> None:
+        """Unsubscribe *callback* from *topic* if it was previously registered."""
+        await self._event_bus.unsubscribe(topic, callback)
+        logger.debug("Unregistered consumer for topic %s", topic)
+
+    async def stop_producer(self, handle: LiveSubscriptionHandle) -> None:
+        """Stop the live producer represented by *handle* and release its resources."""
+        await self._stop_producer_by_id(handle.id)
+
+    async def list_topics(self) -> Mapping[str, int]:
+        """Return a mapping of event bus topics to their subscriber counts."""
+        return await self._event_bus.topics()
+
+    async def get_runtime_metrics(self) -> RuntimeMetrics:
+        """Return a snapshot of runtime metrics for all active producers and consumers."""
+        async with self._handles_lock:
+            snapshots = [handle.producer.snapshot() for handle in self._producer_handles.values()]
+            consumer_topics = await self._event_bus.topics()
+        return RuntimeMetrics(
+            generated_at=datetime.now(UTC),
+            producers=snapshots,
+            consumer_topics=len(consumer_topics),
+        )
+
+    async def start(self) -> None:
+        """Start all registered live producers if the client is not already running."""
+        async with self._handles_lock:
+            if self._started:
+                return
+            for handle in self._producer_handles.values():
+                if handle.task is None:
+                    self._start_producer(handle)
+            self._started = True
+        logger.info("BroadcastifyClient started %d producer(s)", len(self._producer_handles))
+
+    async def shutdown(self) -> None:
+        """Stop all producers, cancel background tasks, and close the HTTP client."""
+        async with self._handles_lock:
+            handles = list(self._producer_handles.values())
+            self._producer_handles.clear()
+            self._started = False
+        for handle in handles:
+            await handle.producer.stop()
+        for handle in handles:
+            self._cancel_handle_tasks(handle)
+        for handle in handles:
+            await self._await_handle_tasks(handle)
+        await self._http_client.close()
+        logger.info("BroadcastifyClient shutdown complete")
+
+    async def list_playlists(self) -> Sequence[PlaylistDescriptor]:
+        """Return playlist descriptors from the configured catalog provider."""
+        if self._playlist_catalog is None:
+            raise NotImplementedError("Playlist catalog integration not configured")
+        return await self._playlist_catalog.list_playlists()
+
+    async def describe_playlist(self, playlist_id: PlaylistId) -> PlaylistSubscriptionState:
+        """Return playlist membership and cursor information for *playlist_id*."""
+        if self._playlist_catalog is None:
+            raise NotImplementedError("Playlist catalog integration not configured")
+        return await self._playlist_catalog.describe_playlist(playlist_id)
+
+    async def search_playlists(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[PlaylistDescriptor]:
+        """Search playlists matching *query*, returning a paginated result set."""
+        if self._playlist_catalog is None:
+            raise NotImplementedError("Playlist catalog integration not configured")
+        return await self._playlist_catalog.search_playlists(query, limit=limit)
+
+    async def search_systems(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[SystemSummary]:
+        """Search systems matching *query*, returning at most *limit* entries."""
+        if self._discovery_client is None:
+            raise NotImplementedError("Discovery integration not configured")
+        return await self._discovery_client.search_systems(query, limit=limit)
+
+    async def search_talkgroups(
+        self, query: str, *, limit: int = 25
+    ) -> SearchResultPage[TalkgroupSummary]:
+        """Search talkgroups matching *query*, returning at most *limit* entries."""
+        if self._discovery_client is None:
+            raise NotImplementedError("Discovery integration not configured")
+        return await self._discovery_client.search_talkgroups(query, limit=limit)
+
+    async def resolve_talkgroup(
+        self, name: str, region: str
+    ) -> TalkgroupSummary | None:
+        """Resolve a talkgroup by *name* and *region*, or ``None`` when no match exists."""
+        if self._discovery_client is None:
+            raise NotImplementedError("Discovery integration not configured")
+        return await self._discovery_client.resolve_talkgroup(name, region)
+
+    async def _register_subscription(
+        self, subscription: Subscription, *, position: float | None
+    ) -> LiveSubscriptionHandle:
+        handle_id = uuid4().hex
+        topic = self._topic_for_subscription(subscription)
         config = LiveProducerConfig(initial_position=position)
         poller = self._call_poller_factory.create(
-            system_id,
-            talkgroup_id,
+            subscription,
             http_client=self._http_client,
             telemetry=self._telemetry,
         )
-        queue: asyncio.Queue[CallEvent] = asyncio.Queue(maxsize=config.queue_maxsize or 0)
-        producer = LiveCallProducer(poller, config, telemetry=self._telemetry, queue=queue)
-        topic = f"{self._live_topic}.{system_id}.{talkgroup_id}"
+        queue: asyncio.Queue[LiveCallEnvelope] = asyncio.Queue(
+            maxsize=config.queue_maxsize or 0
+        )
+        producer = LiveCallProducer(
+            poller,
+            config,
+            topic=topic,
+            telemetry=self._telemetry,
+            queue=queue,
+        )
         audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
         audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
         if audio_consumer is not None:
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         handle = ProducerHandle(
+            id=handle_id,
             producer=producer,
+            subscription=subscription,
             topic=topic,
             audio_consumer=audio_consumer,
             audio_queue=audio_queue,
         )
-        self._producer_handles.append(handle)
-        if self._started:
-            self._start_producer(handle)
-        logger.info(
-            "Registered live producer for system %s talkgroup %s (position=%s)",
-            system_id,
-            talkgroup_id,
-            position,
-        )
-        return producer
-
-    async def register_consumer(self, topic: str, callback: ConsumerCallback) -> None:
-        """Register a consumer callback via the event bus."""
-
-        await self._event_bus.subscribe(topic, callback)
-        logger.debug("Registered consumer for topic %s", topic)
-
-    async def start(self) -> None:
-        """Start all managed live call producers."""
-
-        if self._started:
-            return
-        for handle in self._producer_handles:
-            if handle.task is None:
+        async with self._handles_lock:
+            self._producer_handles[handle_id] = handle
+            if self._started:
                 self._start_producer(handle)
-        self._started = True
-        logger.info("BroadcastifyClient started %d producer(s)", len(self._producer_handles))
-
-    async def shutdown(self) -> None:
-        """Stop producers and release HTTP resources."""
-
-        for handle in self._producer_handles:
-            await handle.producer.stop()
-        for handle in self._producer_handles:
-            self._cancel_handle_tasks(handle)
-        for handle in self._producer_handles:
-            await self._await_handle_tasks(handle)
-        await self._http_client.close()
-        self._producer_handles.clear()
-        self._started = False
-        logger.info("BroadcastifyClient shutdown complete")
+        logger.info("Registered producer %s for topic %s", handle_id, topic)
+        return self._to_public_handle(handle)
 
     def _start_producer(self, handle: ProducerHandle) -> None:
-        """Start the asynchronous task responsible for running *handle*'s producer."""
-
         handle.task = asyncio.create_task(handle.producer.run())
         handle.dispatch_task = asyncio.create_task(self._dispatch_events(handle))
         if handle.audio_queue is not None and handle.audio_consumer is not None:
             handle.audio_dispatch_task = asyncio.create_task(self._dispatch_audio_chunks(handle))
-        logger.debug("Started producer tasks for topic %s", handle.topic)
+        logger.debug("Started producer tasks for %s", handle.topic)
+
+    async def _stop_producer_by_id(self, handle_id: str) -> None:
+        async with self._handles_lock:
+            handle = self._producer_handles.pop(handle_id, None)
+        if handle is None:
+            return
+        await handle.producer.stop()
+        self._cancel_handle_tasks(handle)
+        await self._await_handle_tasks(handle)
+        logger.info("Stopped producer %s", handle_id)
+
+    def _to_public_handle(self, handle: ProducerHandle) -> LiveSubscriptionHandle:
+        return LiveSubscriptionHandle(
+            id=handle.id,
+            topic=handle.topic,
+            subscription=handle.subscription,
+            _stop=self._stop_producer_by_id,
+            _snapshot=self._snapshot_handle,
+        )
+
+    def _snapshot_handle(self, handle_id: str) -> ProducerRuntimeState:
+        handle = self._producer_handles.get(handle_id)
+        if handle is None:
+            raise KeyError(f"Unknown handle id {handle_id}")
+        return handle.producer.snapshot()
 
     async def _dispatch_events(self, handle: ProducerHandle) -> None:
-        """Drain events from a producer queue and publish them to event bus topics."""
-
         queue = handle.producer.queue
         try:
             while True:
@@ -345,6 +518,9 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 try:
                     await self._event_bus.publish(self._live_topic, event)
                     await self._event_bus.publish(handle.topic, event)
+                    call_topic = self._call_topic(event.call.system_id, event.call.talkgroup_id)
+                    if call_topic != handle.topic:
+                        await self._event_bus.publish(call_topic, event)
                     if handle.audio_consumer is not None and handle.audio_queue is not None:
                         audio_task = asyncio.create_task(self._consume_audio(handle, event))
 
@@ -356,17 +532,20 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 except Exception as exc:
                     logger.exception("Failed to publish live event for topic %s", handle.topic)
                     self._telemetry.record_event(
-                        "live_producer.dispatch.error",
-                        attributes={"error_type": exc.__class__.__name__},
+                        LiveDispatchErrorEvent(
+                            topic=handle.topic,
+                            error_type=exc.__class__.__name__,
+                            message=str(exc),
+                        )
                     )
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
             return
 
-    async def _consume_audio(self, handle: ProducerHandle, event: CallEvent) -> None:
-        """Trigger audio download for *event* via the configured consumer."""
-
+    async def _consume_audio(
+        self, handle: ProducerHandle, event: LiveCallEnvelope
+    ) -> None:
         assert handle.audio_consumer is not None
         assert handle.audio_queue is not None
         try:
@@ -380,13 +559,15 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 exc,
             )
             self._telemetry.record_event(
-                "audio_consumer.error",
-                attributes={
-                    "error_type": exc.__class__.__name__,
-                    "call_id": event.call.call_id,
-                },
+                AudioErrorEvent(
+                    call_id=event.call.call_id,
+                    system_id=event.call.system_id,
+                    talkgroup_id=event.call.talkgroup_id,
+                    error_type=exc.__class__.__name__,
+                    message=str(exc),
+                )
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - defensive path
             logger.exception(
                 "Unexpected failure consuming audio for call %s (system %s, talkgroup %s)",
                 event.call.call_id,
@@ -394,16 +575,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 event.call.talkgroup_id,
             )
             self._telemetry.record_event(
-                "audio_consumer.error",
-                attributes={
-                    "error_type": exc.__class__.__name__,
-                    "call_id": event.call.call_id,
-                },
+                AudioErrorEvent(
+                    call_id=event.call.call_id,
+                    system_id=event.call.system_id,
+                    talkgroup_id=event.call.talkgroup_id,
+                    error_type=exc.__class__.__name__,
+                    message=str(exc),
+                )
             )
 
     async def _dispatch_audio_chunks(self, handle: ProducerHandle) -> None:
-        """Publish audio chunks produced for a given handle."""
-
         assert handle.audio_queue is not None
         queue = handle.audio_queue
         try:
@@ -415,8 +596,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 except Exception as exc:
                     logger.exception("Failed to dispatch audio chunk for call %s", chunk.call_id)
                     self._telemetry.record_event(
-                        "audio_dispatch.error",
-                        attributes={"error_type": exc.__class__.__name__},
+                        AudioErrorEvent(
+                            call_id=chunk.call_id,
+                            system_id=-1,
+                            talkgroup_id=-1,
+                            error_type=exc.__class__.__name__,
+                            message=str(exc),
+                        )
                     )
                 finally:
                     queue.task_done()
@@ -444,32 +630,122 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         except asyncio.CancelledError:
             pass
 
+    def _topic_for_subscription(self, subscription: Subscription) -> str:
+        if isinstance(subscription, TalkgroupSubscription):
+            return f"{self._live_topic}.{subscription.system_id}.{subscription.talkgroup_id}"
+        return f"{self._live_topic}.playlist.{subscription.playlist_id}"
+
+    def _call_topic(self, system_id: int, talkgroup_id: int) -> str:
+        return f"{self._live_topic}.{system_id}.{talkgroup_id}"
+
 
 class _DefaultCallPollerFactory(CallPollerFactory):
     """Factory creating HTTP-backed call pollers."""
 
     def create(
         self,
-        system_id: int,
-        talkgroup_id: int,
+        subscription: Subscription,
         *,
         http_client: AsyncHttpClientProtocol,
         telemetry: TelemetrySink,
     ) -> CallPoller:
-        """Return an HTTP-based poller for the given identifiers."""
+        return _HttpCallPoller(subscription, http_client, telemetry)
 
-        return _HttpCallPoller(system_id, talkgroup_id, http_client, telemetry)
+
+class _HttpCallPoller(CallPoller):
+    """HTTP-backed poller that surfaces Broadcastify live call events."""
+
+    _LIVE_ENDPOINT = "/calls/apis/live-calls"
+
+    def __init__(
+        self,
+        subscription: Subscription,
+        http_client: AsyncHttpClientProtocol,
+        telemetry: TelemetrySink,
+    ) -> None:
+        self._subscription = subscription
+        self._http_client = http_client
+        self._telemetry = telemetry
+        self._session_key = _generate_session_key()
+        self._initialised = False
+
+    async def fetch(
+        self, *, cursor: float | None
+    ) -> tuple[Iterable[LiveCallEnvelope], float | None]:
+        position = float(cursor) if cursor is not None else 0.0
+        form_payload = self._build_payload(position)
+        response = await self._http_client.post_form(self._LIVE_ENDPOINT, data=form_payload)
+        try:
+            payload = response.json()
+        except ValueError as exc:  # pragma: no cover - defensive path
+            raise LiveSessionError("Live call payload was not valid JSON") from exc
+
+        envelope = LiveCallsResponse.model_validate(payload)
+        if envelope.session_key:
+            self._session_key = envelope.session_key
+
+        events = [self._to_call_event(entry) for entry in envelope.calls]
+        next_cursor = self._calculate_cursor(envelope, events, position)
+        self._initialised = True
+        self._telemetry.record_metric(
+            PollMetrics(
+                topic="poller",
+                dispatched=len(events),
+                queue_depth=0,
+            )
+        )
+        return events, next_cursor
+
+    def _build_payload(self, position: float) -> dict[str, str]:
+        payload = {
+            "pos": f"{position:.3f}",
+            "doInit": "1" if not self._initialised else "0",
+            "sessionKey": self._session_key,
+        }
+        if isinstance(self._subscription, TalkgroupSubscription):
+            payload["groups[]"] = (
+                f"{self._subscription.system_id}-{self._subscription.talkgroup_id}"
+            )
+            payload["systemId"] = str(self._subscription.system_id)
+        else:
+            payload["playlist_uuid"] = self._subscription.playlist_id
+            payload["systemId"] = "0"
+        payload.setdefault("sid", "0")
+        return payload
+
+    def _calculate_cursor(
+        self,
+        envelope: LiveCallsResponse,
+        events: list[LiveCallEnvelope],
+        current: float,
+    ) -> float | None:
+        candidates: list[float] = [float(envelope.last_pos), current]
+        for event in events:
+            if event.cursor is not None:
+                candidates.append(float(event.cursor))
+            candidates.append(event.call.received_at.timestamp() + 1.0)
+        return max(candidates) if candidates else current
+
+    def _to_call_event(self, entry: LiveCallEntry) -> LiveCallEnvelope:
+        call = _parse_live_call(entry)
+        cursor = entry.pos
+        now = datetime.now(UTC)
+        raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
+        return LiveCallEnvelope(
+            call=call,
+            cursor=cursor,
+            received_at=now,
+            shard_key=(call.system_id, call.talkgroup_id),
+            raw_payload=raw_payload,
+        )
 
 
 def _generate_session_key() -> str:
-    """Return a random session key accepted by the Broadcastify endpoint."""
-
     return secrets.token_hex(16)
 
 
 def _parse_live_call(entry: LiveCallEntry) -> Call:
-    metadata = _normalize_live_metadata(entry.metadata)
-    raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
+    metadata = parse_call_metadata(entry.metadata)
     return Call(
         call_id=entry.id,
         system_id=entry.system_id,
@@ -478,13 +754,4 @@ def _parse_live_call(entry: LiveCallEntry) -> Call:
         frequency_hz=entry.call_freq,
         metadata=metadata,
         ttl_seconds=entry.call_ttl,
-        raw=raw_payload,
     )
-
-
-def _normalize_live_metadata(value: Mapping[str, Any] | None) -> Mapping[str, str]:
-    if value is None:
-        return MappingProxyType({})
-    mapping = dict(value)
-    normalized = {str(key): str(val) for key, val in mapping.items()}
-    return MappingProxyType(normalized)

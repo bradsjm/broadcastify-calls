@@ -1,3 +1,5 @@
+"""Integration-focused tests covering Broadcastify client interactions."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,8 +16,8 @@ from broadcastify_client import (
     AudioChunkEvent,
     BroadcastifyClient,
     Call,
-    CallEvent,
     Credentials,
+    LiveCallEnvelope,
     SessionToken,
     TimeWindow,
 )
@@ -23,10 +25,12 @@ from broadcastify_client.archives import ArchiveClient
 from broadcastify_client.audio_consumer import AudioConsumer
 from broadcastify_client.client import (
     BroadcastifyClientDependencies,
+    TalkgroupSubscription,
     _HttpCallPoller,  # pyright: ignore[reportPrivateUsage]
 )
 from broadcastify_client.http import AsyncHttpClientProtocol
 from broadcastify_client.live_producer import CallPoller
+from broadcastify_client.models import CallMetadata
 from broadcastify_client.telemetry import NullTelemetrySink, TelemetrySink
 
 TEST_USERNAME = "alice"
@@ -36,31 +40,42 @@ EXPECTED_CALL_ID = "1-2"
 
 
 class StubAuthenticationBackend:
+    """Test double that records authentication calls without hitting the network."""
+
     def __init__(self) -> None:
+        """Initialise counters used to assert login/logout behaviour."""
         self.login_calls = 0
         self.logout_calls = 0
 
     async def login(self, credentials: Credentials) -> SessionToken:
+        """Simulate login by returning a token derived from the username."""
         self.login_calls += 1
         return SessionToken(token=f"token-{credentials.username}")
 
     async def logout(self, token: SessionToken) -> None:
+        """Record that logout was invoked for assertions."""
         self.logout_calls += 1
 
 
 class StubArchiveClient:
+    """Archive client stub returning a preconfigured result."""
+
     def __init__(self, result: ArchiveResult) -> None:
+        """Store the canned `result` and reset call counters."""
         self._result = result
         self.calls = 0
 
     async def get_archived_calls(
         self, system_id: int, talkgroup_id: int, time_block: int
     ) -> ArchiveResult:
+        """Return the canned archive result while recording invocation count."""
         self.calls += 1
         return self._result
 
 
 class StubHttpClient(AsyncHttpClientProtocol):
+    """HTTP client stub that raises when unexpected calls occur."""
+
     async def post_form(
         self,
         url: str,
@@ -68,6 +83,7 @@ class StubHttpClient(AsyncHttpClientProtocol):
         *,
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:  # pragma: no cover - unused in tests
+        """Fail if a POST request is attempted during the tests."""
         raise AssertionError("post_form should not be called in tests")
 
     async def get(
@@ -77,19 +93,27 @@ class StubHttpClient(AsyncHttpClientProtocol):
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, object] | None = None,
     ) -> httpx.Response:  # pragma: no cover - unused in tests
+        """Fail if a GET request is attempted during the tests."""
         raise AssertionError("get should not be called in tests")
 
     async def close(self) -> None:
+        """Match protocol expectations for closing the client."""
         return None
 
 
 class StubCallPoller:
-    def __init__(self, event: CallEvent) -> None:
+    """Single-event poller that emits one envelope then idles."""
+
+    def __init__(self, event: LiveCallEnvelope) -> None:
+        """Remember the `event` to replay and reset fetch state."""
         self.event = event
         self.invocations = 0
         self._delivered = False
 
-    async def fetch(self, *, cursor: float | None) -> tuple[Iterable[CallEvent], float | None]:
+    async def fetch(
+        self, *, cursor: float | None
+    ) -> tuple[Iterable[LiveCallEnvelope], float | None]:
+        """Return the configured event on first fetch, then emit no additional data."""
         self.invocations += 1
         if not self._delivered:
             self._delivered = True
@@ -99,28 +123,35 @@ class StubCallPoller:
 
 
 class StubCallPollerFactory:
-    def __init__(self, event: CallEvent) -> None:
+    """Factory stub that dispenses `StubCallPoller` instances."""
+
+    def __init__(self, event: LiveCallEnvelope) -> None:
+        """Store the `event` used to initialise pollers and reset tracking."""
         self.event = event
         self.pollers: list[StubCallPoller] = []
 
     def create(
         self,
-        system_id: int,
-        talkgroup_id: int,
+        subscription: object,
         *,
         http_client: AsyncHttpClientProtocol,
         telemetry: TelemetrySink,
     ) -> CallPoller:
+        """Create a new `StubCallPoller` tied to the stored event."""
         poller = StubCallPoller(self.event)
         self.pollers.append(poller)
         return poller
 
 
 class StubAudioDownloader:
+    """Downloader stub that records audio fetch requests."""
+
     def __init__(self) -> None:
+        """Initialise storage for requested call identifiers."""
         self.requests: list[str] = []
 
-    async def fetch_audio(self, call: CallEvent) -> AsyncIterator[AudioChunkEvent]:
+    async def fetch_audio(self, call: LiveCallEnvelope) -> AsyncIterator[AudioChunkEvent]:
+        """Yield two canned audio chunks while recording the call identifier."""
         self.requests.append(call.call.call_id)
 
         async def _iterator() -> AsyncIterator[AudioChunkEvent]:
@@ -148,6 +179,7 @@ class StubAudioDownloader:
 
 @pytest.mark.asyncio
 async def test_authenticate_with_credentials_caches_token() -> None:
+    """Ensure repeated authentication reuses the cached session token."""
     backend = StubAuthenticationBackend()
     now = datetime.now(UTC)
     archive_result = ArchiveResult(
@@ -165,10 +197,10 @@ async def test_authenticate_with_credentials_caches_token() -> None:
         talkgroup_id=2,
         received_at=datetime.now(UTC),
         frequency_hz=None,
-        metadata={},
+        metadata=CallMetadata(),
     )
     poller_factory = StubCallPollerFactory(
-        CallEvent(
+        LiveCallEnvelope(
             call=base_call,
             cursor=None,
             received_at=datetime.now(UTC),
@@ -201,6 +233,7 @@ async def test_authenticate_with_credentials_caches_token() -> None:
 
 @pytest.mark.asyncio
 async def test_get_archived_calls_uses_archive_client() -> None:
+    """Verify archive retrieval delegates to the configured archive client."""
     backend = StubAuthenticationBackend()
     now = datetime.now(UTC)
     archive_result = ArchiveResult(
@@ -218,9 +251,9 @@ async def test_get_archived_calls_uses_archive_client() -> None:
         talkgroup_id=4,
         received_at=datetime.now(UTC),
         frequency_hz=None,
-        metadata={},
+        metadata=CallMetadata(),
     )
-    event = CallEvent(
+    event = LiveCallEnvelope(
         call=call_instance,
         cursor=5.0,
         received_at=datetime.now(UTC),
@@ -246,6 +279,7 @@ async def test_get_archived_calls_uses_archive_client() -> None:
 
 @pytest.mark.asyncio
 async def test_create_live_producer_emits_events_once_started() -> None:
+    """Confirm live producers emit events once started and routed to consumers."""
     backend = StubAuthenticationBackend()
     now = datetime.now(UTC)
     archive_result = ArchiveResult(
@@ -263,9 +297,9 @@ async def test_create_live_producer_emits_events_once_started() -> None:
         talkgroup_id=2,
         received_at=datetime.now(UTC),
         frequency_hz=851.0125,
-        metadata={},
+        metadata=CallMetadata(),
     )
-    call_event = CallEvent(
+    call_event = LiveCallEnvelope(
         call=call_payload,
         cursor=12.0,
         received_at=datetime.now(UTC),
@@ -281,25 +315,26 @@ async def test_create_live_producer_emits_events_once_started() -> None:
     )
     client = BroadcastifyClient(dependencies=dependencies)
 
-    received_general: list[CallEvent] = []
-    received_specific: list[CallEvent] = []
+    received_general: list[LiveCallEnvelope] = []
+    received_specific: list[LiveCallEnvelope] = []
     general_event = asyncio.Event()
     specific_event = asyncio.Event()
 
     async def general_consumer(event: object) -> None:
-        assert isinstance(event, CallEvent)
+        assert isinstance(event, LiveCallEnvelope)
         received_general.append(event)
         general_event.set()
 
     async def specific_consumer(event: object) -> None:
-        assert isinstance(event, CallEvent)
+        assert isinstance(event, LiveCallEnvelope)
         received_specific.append(event)
         specific_event.set()
 
     await client.register_consumer("calls.live", general_consumer)
     await client.register_consumer("calls.live.1.2", specific_consumer)
 
-    await client.create_live_producer(system_id=1, talkgroup_id=2)
+    handle = await client.create_live_producer(system_id=1, talkgroup_id=2)
+    assert handle.topic.endswith("1.2")
     await client.start()
     try:
         await asyncio.wait_for(general_event.wait(), timeout=1.0)
@@ -314,6 +349,7 @@ async def test_create_live_producer_emits_events_once_started() -> None:
 
 @pytest.mark.asyncio
 async def test_audio_pipeline_publishes_chunks() -> None:
+    """Ensure audio pipeline publishes chunks and marks completion."""
     backend = StubAuthenticationBackend()
     now = datetime.now(UTC)
     archive_result = ArchiveResult(
@@ -331,9 +367,9 @@ async def test_audio_pipeline_publishes_chunks() -> None:
         talkgroup_id=2,
         received_at=datetime.now(UTC),
         frequency_hz=851.0125,
-        metadata={},
+        metadata=CallMetadata(),
     )
-    call_event = CallEvent(
+    call_event = LiveCallEnvelope(
         call=call_payload,
         cursor=12.0,
         received_at=datetime.now(UTC),
@@ -370,7 +406,8 @@ async def test_audio_pipeline_publishes_chunks() -> None:
     await client.register_consumer("calls.audio", audio_general_consumer)
     await client.register_consumer(f"calls.audio.{EXPECTED_CALL_ID}", audio_specific_consumer)
 
-    await client.create_live_producer(system_id=1, talkgroup_id=2)
+    handle = await client.create_live_producer(system_id=1, talkgroup_id=2)
+    assert handle.topic.endswith("1.2")
     await client.start()
     try:
         await asyncio.wait_for(audio_general_event.wait(), timeout=1.0)
@@ -384,7 +421,10 @@ async def test_audio_pipeline_publishes_chunks() -> None:
 
 
 class RecordingHttpClient(AsyncHttpClientProtocol):
+    """HTTP client used for verifying poller requests and responses."""
+
     def __init__(self, payloads: list[dict[str, object]]) -> None:
+        """Initialise the client with sequential JSON `payloads` to return."""
         self._payloads = payloads
         self.calls: list[dict[str, object]] = []
 
@@ -395,6 +435,7 @@ class RecordingHttpClient(AsyncHttpClientProtocol):
         *,
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
+        """Record the request payload and return the next canned response."""
         self.calls.append({"url": url, "data": dict(data)})
         if not self._payloads:
             raise AssertionError("Unexpected additional poll request")
@@ -409,14 +450,17 @@ class RecordingHttpClient(AsyncHttpClientProtocol):
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, object] | None = None,
     ) -> httpx.Response:
+        """Disallow GET usage in poller tests."""
         raise AssertionError("get should not be called")
 
     async def close(self) -> None:
+        """Match the `AsyncHttpClientProtocol` close contract."""
         return None
 
 
 @pytest.mark.asyncio
 async def test_http_call_poller_parses_events() -> None:
+    """Exercise the HTTP call poller parsing logic using canned responses."""
     expected_last_pos = 15.0
     expected_frequency = 851.0125
     expected_cursor = 12.5
@@ -446,28 +490,28 @@ async def test_http_call_poller_parses_events() -> None:
     http_client = RecordingHttpClient([first_payload, second_payload])
     telemetry = NullTelemetrySink()
     poller = _HttpCallPoller(
-        system_id=1,
-        talkgroup_id=2,
+        TalkgroupSubscription(system_id=1, talkgroup_id=2),
         http_client=http_client,
         telemetry=telemetry,
     )
 
-    events, cursor = await poller.fetch(cursor=None)
+    events_iter, cursor = await poller.fetch(cursor=None)
 
     assert cursor == expected_last_pos
+    events = list(events_iter)
     assert len(events) == 1
     event = events[0]
     assert event.call.call_id == "1-2"
     assert event.call.frequency_hz == expected_frequency
-    assert event.call.metadata["foo"] == "bar"
+    assert event.call.metadata.extras.get("foo") == "bar"
     assert event.cursor == expected_cursor
     assert poller._session_key == "server-session"  # type: ignore[attr-defined]
     first_request = cast(dict[str, str], http_client.calls[0]["data"])
     assert first_request["doInit"] == "1"
 
-    events_second, cursor_second = await poller.fetch(cursor=cursor)
+    events_second_iter, cursor_second = await poller.fetch(cursor=cursor)
 
-    assert events_second == []
+    assert list(events_second_iter) == []
     assert cursor_second == next_cursor_value
     second_request = cast(dict[str, str], http_client.calls[1]["data"])
     assert second_request["doInit"] == "0"
