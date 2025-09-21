@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterable
 from secrets import SystemRandom
 from typing import Protocol
@@ -11,6 +12,8 @@ from .config import LiveProducerConfig
 from .errors import BroadcastifyError, LiveSessionError
 from .models import CallEvent
 from .telemetry import NullTelemetrySink, TelemetrySink
+
+logger = logging.getLogger(__name__)
 
 
 class CallPoller(Protocol):
@@ -73,6 +76,12 @@ class LiveCallProducer:
                 events, next_cursor = await self._poller.fetch(cursor=self._cursor)
             except BroadcastifyError as exc:
                 consecutive_failures += 1
+                logger.warning(
+                    "Live poll failed for cursor %s (attempt %s): %s",
+                    self._cursor,
+                    consecutive_failures,
+                    exc,
+                )
                 self._telemetry.record_event(
                     "live_producer.poll.error",
                     attributes={
@@ -89,6 +98,7 @@ class LiveCallProducer:
                 backoff = min(backoff * 2.0, self._config.max_backoff)
                 continue
             except Exception as exc:  # pragma: no cover - defensive path
+                logger.exception("Unexpected failure while fetching live calls")
                 self._telemetry.record_event(
                     "live_producer.poll.error",
                     attributes={"error_type": exc.__class__.__name__},
@@ -105,6 +115,7 @@ class LiveCallProducer:
                     task_group.create_task(self._queue.put(event))
 
             self._telemetry.record_metric("live_producer.dispatched", float(dispatched))
+            logger.debug("Dispatched %s call event(s) for queue", dispatched)
             if next_cursor is not None:
                 self._cursor = next_cursor
 
@@ -125,6 +136,7 @@ class LiveCallProducer:
         """Request termination of the producer loop."""
 
         self._stopped.set()
+        logger.info("LiveCallProducer received stop request")
 
 
 def _jittered_interval(poll_interval: float, jitter_ratio: float) -> float:

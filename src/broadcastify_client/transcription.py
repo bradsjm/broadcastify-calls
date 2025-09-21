@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Protocol
 
 from .errors import TranscriptionError
 from .models import AudioChunkEvent, TranscriptionPartial, TranscriptionResult
 from .telemetry import NullTelemetrySink, TelemetrySink
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptionBackend(Protocol):
@@ -48,12 +51,15 @@ class TranscriptionPipeline:
         """Yield transcription partials for *audio_stream*."""
 
         try:
+            logger.debug("Starting streaming transcription")
             partial_stream = await self._backend.stream_transcription(audio_stream)
             async for partial in partial_stream:
                 yield partial
         except TranscriptionError:
+            logger.warning("Streaming transcription backend raised TranscriptionError")
             raise
         except Exception as exc:  # pragma: no cover - defensive path
+            logger.exception("Unexpected streaming transcription failure")
             raise TranscriptionError(str(exc)) from exc
 
     async def transcribe_final(
@@ -62,8 +68,11 @@ class TranscriptionPipeline:
         """Return the final transcription result for *audio_stream*."""
 
         try:
+            logger.debug("Starting final transcription")
             return await self._backend.finalize(audio_stream)
         except TranscriptionError:
+            logger.warning("Final transcription backend raised TranscriptionError")
             raise
         except Exception as exc:  # pragma: no cover - defensive path
+            logger.exception("Unexpected final transcription failure")
             raise TranscriptionError(str(exc)) from exc

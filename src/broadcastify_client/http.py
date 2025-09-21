@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, MutableMapping
 from typing import Any, Protocol
 
@@ -9,6 +10,8 @@ import httpx
 
 from .config import HttpClientConfig
 from .errors import TransportError
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncHttpClientProtocol(Protocol):
@@ -66,11 +69,23 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
     ) -> httpx.Response:
         """Send a form-encoded POST request with browser-mimicking headers."""
 
+        logger.debug("POST %s with %d form field(s)", url, len(data))
         try:
             response = await self._client.post(url, data=data, headers=self._merge_headers(headers))
         except httpx.HTTPError as exc:  # pragma: no cover - network failure path
+            logger.error("HTTP POST to %s failed: %s", url, exc)
             raise TransportError(str(exc)) from exc
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            logger.error("HTTP POST to %s returned status %s", url, status)
+            raise
+        logger.debug(
+            "POST %s completed in %.2f ms",
+            url,
+            response.elapsed.total_seconds() * 1000.0,
+        )
         return response
 
     async def get(
@@ -82,6 +97,7 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
     ) -> httpx.Response:
         """Send a GET request respecting connection pooling and compression settings."""
 
+        logger.debug("GET %s with params=%s", url, None if params is None else list(params.keys()))
         try:
             response = await self._client.get(
                 url,
@@ -89,14 +105,26 @@ class BroadcastifyHttpClient(AsyncHttpClientProtocol):
                 headers=self._merge_headers(headers),
             )
         except httpx.HTTPError as exc:  # pragma: no cover - network failure path
+            logger.error("HTTP GET %s failed: %s", url, exc)
             raise TransportError(str(exc)) from exc
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            logger.error("HTTP GET %s returned status %s", url, status)
+            raise
+        logger.debug(
+            "GET %s completed in %.2f ms",
+            url,
+            response.elapsed.total_seconds() * 1000.0,
+        )
         return response
 
     async def close(self) -> None:
         """Close the underlying httpx.AsyncClient instance."""
 
         await self._client.aclose()
+        logger.debug("httpx.AsyncClient closed for base URL %s", self._client.base_url)
 
     def _merge_headers(self, headers: Mapping[str, str] | None) -> MutableMapping[str, str]:
         """Merge default headers with user-provided *headers*."""

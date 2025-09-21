@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 import httpx
@@ -10,6 +11,8 @@ from .config import Credentials, HttpClientConfig
 from .errors import AuthenticationError
 from .http import AsyncHttpClientProtocol
 from .models import SessionToken
+
+logger = logging.getLogger(__name__)
 
 
 class AuthenticationBackend(Protocol):
@@ -42,12 +45,14 @@ class HttpAuthenticationBackend(AuthenticationBackend):
     async def login(self, credentials: Credentials) -> SessionToken:
         """Submit the login form and extract the session cookie."""
 
+        logger.debug("Submitting Broadcastify login request for user %s", credentials.username)
         response = await self._http_client.post_form(
             "/login/",
             data={"username": credentials.username, "password": credentials.password},
         )
         token_value = _extract_session_cookie(response.cookies)
         if token_value is None:
+            logger.error("Login response missing session cookie for user %s", credentials.username)
             raise AuthenticationError("Missing session cookie in login response")
         return SessionToken(token=token_value)
 
@@ -56,8 +61,8 @@ class HttpAuthenticationBackend(AuthenticationBackend):
 
         try:
             await self._http_client.get("/logout/")
-        except httpx.HTTPError:  # pragma: no cover - best effort path
-            # Logging will be added by telemetry integration.
+        except httpx.HTTPError as exc:  # pragma: no cover - best effort path
+            logger.warning("Broadcastify logout request failed", exc_info=exc)
             return
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
 from .models import ArchiveResult, AudioChunkEvent, Call, CallEvent, SessionToken
 from .telemetry import NullTelemetrySink, TelemetrySink
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncBroadcastifyClient(Protocol):
@@ -245,6 +248,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
+        logger.debug(
+            "BroadcastifyClient initialised with %d pre-registered producers",
+            len(self._producer_handles),
+        )
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate using credentials or validate the provided session token."""
@@ -291,12 +298,19 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._producer_handles.append(handle)
         if self._started:
             self._start_producer(handle)
+        logger.info(
+            "Registered live producer for system %s talkgroup %s (position=%s)",
+            system_id,
+            talkgroup_id,
+            position,
+        )
         return producer
 
     async def register_consumer(self, topic: str, callback: ConsumerCallback) -> None:
         """Register a consumer callback via the event bus."""
 
         await self._event_bus.subscribe(topic, callback)
+        logger.debug("Registered consumer for topic %s", topic)
 
     async def start(self) -> None:
         """Start all managed live call producers."""
@@ -307,6 +321,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             if handle.task is None:
                 self._start_producer(handle)
         self._started = True
+        logger.info("BroadcastifyClient started %d producer(s)", len(self._producer_handles))
 
     async def shutdown(self) -> None:
         """Stop producers and release HTTP resources."""
@@ -320,6 +335,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         await self._http_client.close()
         self._producer_handles.clear()
         self._started = False
+        logger.info("BroadcastifyClient shutdown complete")
 
     def _start_producer(self, handle: ProducerHandle) -> None:
         """Start the asynchronous task responsible for running *handle*'s producer."""
@@ -328,6 +344,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         handle.dispatch_task = asyncio.create_task(self._dispatch_events(handle))
         if handle.audio_queue is not None and handle.audio_consumer is not None:
             handle.audio_dispatch_task = asyncio.create_task(self._dispatch_audio_chunks(handle))
+        logger.debug("Started producer tasks for topic %s", handle.topic)
 
     async def _dispatch_events(self, handle: ProducerHandle) -> None:
         """Drain events from a producer queue and publish them to event bus topics."""
@@ -347,7 +364,8 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
 
                         handle.audio_tasks.add(audio_task)
                         audio_task.add_done_callback(_remove)
-                except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+                except Exception as exc:
+                    logger.exception("Failed to publish live event for topic %s", handle.topic)
                     self._telemetry.record_event(
                         "live_producer.dispatch.error",
                         attributes={"error_type": exc.__class__.__name__},
@@ -365,6 +383,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         try:
             await handle.audio_consumer.consume(event, handle.audio_queue)
         except AudioDownloadError as exc:
+            logger.warning(
+                "Audio download failed for call %s (system %s, talkgroup %s): %s",
+                event.call.call_id,
+                event.call.system_id,
+                event.call.talkgroup_id,
+                exc,
+            )
             self._telemetry.record_event(
                 "audio_consumer.error",
                 attributes={
@@ -372,7 +397,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                     "call_id": event.call.call_id,
                 },
             )
-        except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+        except Exception as exc:
+            logger.exception(
+                "Unexpected failure consuming audio for call %s (system %s, talkgroup %s)",
+                event.call.call_id,
+                event.call.system_id,
+                event.call.talkgroup_id,
+            )
             self._telemetry.record_event(
                 "audio_consumer.error",
                 attributes={
@@ -392,7 +423,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 try:
                     await self._event_bus.publish(self._audio_topic, chunk)
                     await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
-                except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to dispatch audio chunk for call %s", chunk.call_id
+                    )
                     self._telemetry.record_event(
                         "audio_dispatch.error",
                         attributes={"error_type": exc.__class__.__name__},

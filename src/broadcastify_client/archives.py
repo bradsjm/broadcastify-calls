@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -14,6 +15,8 @@ from .config import CacheConfig
 from .errors import ResponseParsingError
 from .http import AsyncHttpClientProtocol
 from .models import ArchiveResult, Call, TimeWindow
+
+logger = logging.getLogger(__name__)
 
 
 class ArchiveParser(Protocol):
@@ -50,7 +53,14 @@ class ArchiveClient:
         key = (system_id, talkgroup_id, time_block)
         cached = await self._cache.get(key)
         if cached is not None:
+            logger.debug("Archive cache hit for key %s", key)
             return cached.mark_cache_hit()
+        logger.info(
+            "Fetching archived calls for system %s talkgroup %s block %s",
+            system_id,
+            talkgroup_id,
+            time_block,
+        )
         response = await self._http_client.get(
             "/archives/",
             params={"systemId": system_id, "talkgroupId": talkgroup_id, "time": time_block},
@@ -58,8 +68,15 @@ class ArchiveClient:
         try:
             result = self._parser.parse(response)
         except Exception as exc:  # pragma: no cover - defensive path
+            logger.exception(
+                "Failed to parse archive response for system %s talkgroup %s block %s",
+                system_id,
+                talkgroup_id,
+                time_block,
+            )
             raise ResponseParsingError(str(exc)) from exc
         await self._cache.set(key, result)
+        logger.debug("Stored archive response in cache for key %s", key)
         return result
 
 
