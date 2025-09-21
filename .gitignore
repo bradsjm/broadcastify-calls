@@ -1,0 +1,19 @@
+# Runtime
+.venv/
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.pyright/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# uv
+uv.lock

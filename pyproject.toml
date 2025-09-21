@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "broadcastify-calls"
+version = "0.1.0"
+description = "Async Broadcastify client scaffolding for consuming live and archived call feeds."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "UNLICENSED" }
+authors = [
+    { name = "Jonathan Bradshaw" },
+]
+keywords = ["broadcastify", "asyncio", "event-driven", "audio", "telemetry"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Communications",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "aiolimiter>=1.1.0",
+    "anyio>=4.4.0",
+    "httpx[http2]>=0.27.0",
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+telemetry = [
+    "opentelemetry-instrumentation-httpx>=0.47b0",
+    "opentelemetry-sdk>=1.28.0",
+]
+transcription = [
+    "openai>=1.40.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+broadcastify_client = ["py.typed"]
+
+[dependency-groups]
+dev = [
+    "coverage[toml]>=7.6.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.9",
+]
+telemetry = [
+    "opentelemetry-instrumentation-httpx>=0.47b0",
+    "opentelemetry-sdk>=1.28.0",
+]
+transcription = [
+    "openai>=1.40.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "ASYNC", "UP", "S", "BLE", "C4", "DTZ", "PL", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["broadcastify_client"]
+combined-as-imports = true
+
+[tool.ruff.format]
+preview = true
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+xfail_strict = true
+addopts = "--cov=broadcastify_client --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["broadcastify_client"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = "warning"
+reportPrivateUsage = "error"

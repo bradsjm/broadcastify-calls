@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/pyright/config.schema.json",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "strict",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingTypeStubs": "warning",
+  "reportPrivateUsage": "error",
+  "exclude": ["**/__pycache__", ".venv"]
+}
