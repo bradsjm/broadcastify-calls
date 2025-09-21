@@ -684,7 +684,7 @@ class _HttpCallPoller(CallPoller):
         if envelope.session_key:
             self._session_key = envelope.session_key
 
-        events = [self._to_call_event(entry) for entry in envelope.calls]
+        events = [self._to_call_event(entry, envelope.last_pos) for entry in envelope.calls]
         next_cursor = self._calculate_cursor(envelope, events, position)
         self._initialised = True
         self._telemetry.record_metric(
@@ -726,9 +726,9 @@ class _HttpCallPoller(CallPoller):
             candidates.append(event.call.received_at.timestamp() + 1.0)
         return max(candidates) if candidates else current
 
-    def _to_call_event(self, entry: LiveCallEntry) -> LiveCallEnvelope:
+    def _to_call_event(self, entry: LiveCallEntry, default_cursor: float) -> LiveCallEnvelope:
         call = _parse_live_call(entry)
-        cursor = entry.pos
+        cursor = entry.pos if entry.pos is not None else default_cursor
         now = datetime.now(UTC)
         raw_payload = MappingProxyType(entry.model_dump(by_alias=True))
         return LiveCallEnvelope(
@@ -751,7 +751,7 @@ def _parse_live_call(entry: LiveCallEntry) -> Call:
         system_id=entry.system_id,
         talkgroup_id=entry.call_tg,
         received_at=datetime.fromtimestamp(entry.ts, UTC),
-        frequency_hz=entry.call_freq,
+        frequency_mhz=entry.call_freq,
         metadata=metadata,
         ttl_seconds=entry.call_ttl,
     )

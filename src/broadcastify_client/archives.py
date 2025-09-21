@@ -118,7 +118,7 @@ class JsonArchiveParser(ArchiveParser):
             system_id=entry.system_id,
             talkgroup_id=entry.call_tg,
             received_at=datetime.fromtimestamp(entry.ts, UTC),
-            frequency_hz=entry.call_freq,
+            frequency_mhz=entry.call_freq,
             metadata=metadata,
             ttl_seconds=entry.call_ttl,
         )

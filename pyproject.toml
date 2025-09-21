@@ -71,7 +71,7 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "ASYNC", "UP", "S", "BLE", "C4", "DTZ", "PL", "RUF", "D"]
-ignore = ["S101"]
+ignore = ["S101", "D203", "D213"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["broadcastify_client"]

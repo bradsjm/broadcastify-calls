@@ -169,22 +169,25 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
     """Return a single-line summary for *event* limited to *metadata_limit* entries."""
     call = event.call
     timestamp = _format_timestamp(call.received_at)
-    frequency = _format_frequency(call.frequency_hz)
-    cursor = _format_optional_float(event.cursor)
-    ttl = _format_optional_float(call.ttl_seconds, suffix="s")
-    metadata_text = _format_metadata(call.metadata, metadata_limit)
-    parts = [
-        f"{timestamp}",
-        f"call={call.call_id}",
-        f"system={call.system_id}",
-        f"talkgroup={call.talkgroup_id}",
-        f"freq={frequency}",
-        f"cursor={cursor}",
-        f"ttl={ttl}",
+    talkgroup = _format_talkgroup(call.talkgroup_id, call.metadata)
+    frequency = _format_frequency(call.frequency_mhz)
+    cursor = _format_cursor(event.cursor)
+    expires_at = _format_expiration(call.ttl_seconds)
+    components = [
+        timestamp,
+        f"call {call.call_id}",
+        f"system {call.system_id}",
+        f"talkgroup {talkgroup}",
+        f"freq {frequency}",
+        f"cursor {cursor}",
     ]
+    if expires_at is not None:
+        components.append(f"expires {expires_at}")
+    header = " | ".join(components)
+    metadata_text = _format_metadata(call.metadata, metadata_limit)
     if metadata_text:
-        parts.append(f"metadata={metadata_text}")
-    return " ".join(parts)
+        return f"{header}\n  metadata: {metadata_text}"
+    return header
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -218,16 +221,32 @@ def _format_timestamp(value: datetime) -> str:
 def _format_frequency(value: float | None) -> str:
     if value is None:
         return "-"
-    return f"{value / 1_000_000:.6f}MHz"
+    return f"{value:.6f}".rstrip("0").rstrip(".") + " MHz"
 
 
-def _format_optional_float(value: float | None, *, suffix: str | None = None) -> str:
+def _format_cursor(value: float | None) -> str:
     if value is None:
         return "-"
-    formatted = f"{value:.3f}"
-    if suffix:
-        return f"{formatted}{suffix}"
-    return formatted
+    if float(value).is_integer():
+        return f"{int(value)}"
+    return f"{value:.3f}"
+
+
+def _format_expiration(value: float | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        expires_at = datetime.fromtimestamp(value, UTC)
+    except (OSError, OverflowError, ValueError):  # pragma: no cover - defensive path
+        return None
+    return expires_at.isoformat()
+
+
+def _format_talkgroup(talkgroup_id: int, metadata: CallMetadata) -> str:
+    talkgroup_name = metadata.channel.talkgroup_name if metadata.channel else None
+    if talkgroup_name and talkgroup_name != str(talkgroup_id):
+        return f"{talkgroup_id} ({talkgroup_name})"
+    return str(talkgroup_id)
 
 
 def _format_metadata(metadata: CallMetadata, limit: int) -> str:

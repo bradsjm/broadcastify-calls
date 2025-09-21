@@ -23,6 +23,7 @@ from broadcastify_client import (
 )
 from broadcastify_client.archives import ArchiveClient
 from broadcastify_client.audio_consumer import AudioConsumer
+from broadcastify_client.cli import format_call_event
 from broadcastify_client.client import (
     BroadcastifyClientDependencies,
     TalkgroupSubscription,
@@ -30,7 +31,7 @@ from broadcastify_client.client import (
 )
 from broadcastify_client.http import AsyncHttpClientProtocol
 from broadcastify_client.live_producer import CallPoller
-from broadcastify_client.models import CallMetadata
+from broadcastify_client.models import CallMetadata, ChannelDescriptor, Extras
 from broadcastify_client.telemetry import NullTelemetrySink, TelemetrySink
 
 TEST_USERNAME = "alice"
@@ -196,7 +197,7 @@ async def test_authenticate_with_credentials_caches_token() -> None:
         system_id=1,
         talkgroup_id=2,
         received_at=datetime.now(UTC),
-        frequency_hz=None,
+        frequency_mhz=None,
         metadata=CallMetadata(),
     )
     poller_factory = StubCallPollerFactory(
@@ -250,7 +251,7 @@ async def test_get_archived_calls_uses_archive_client() -> None:
         system_id=3,
         talkgroup_id=4,
         received_at=datetime.now(UTC),
-        frequency_hz=None,
+        frequency_mhz=None,
         metadata=CallMetadata(),
     )
     event = LiveCallEnvelope(
@@ -296,7 +297,7 @@ async def test_create_live_producer_emits_events_once_started() -> None:
         system_id=1,
         talkgroup_id=2,
         received_at=datetime.now(UTC),
-        frequency_hz=851.0125,
+        frequency_mhz=851.0125,
         metadata=CallMetadata(),
     )
     call_event = LiveCallEnvelope(
@@ -366,7 +367,7 @@ async def test_audio_pipeline_publishes_chunks() -> None:
         system_id=1,
         talkgroup_id=2,
         received_at=datetime.now(UTC),
-        frequency_hz=851.0125,
+        frequency_mhz=851.0125,
         metadata=CallMetadata(),
     )
     call_event = LiveCallEnvelope(
@@ -502,7 +503,7 @@ async def test_http_call_poller_parses_events() -> None:
     assert len(events) == 1
     event = events[0]
     assert event.call.call_id == "1-2"
-    assert event.call.frequency_hz == expected_frequency
+    assert event.call.frequency_mhz == expected_frequency
     assert event.call.metadata.extras.get("foo") == "bar"
     assert event.cursor == expected_cursor
     assert poller._session_key == "server-session"  # type: ignore[attr-defined]
@@ -515,3 +516,73 @@ async def test_http_call_poller_parses_events() -> None:
     assert cursor_second == next_cursor_value
     second_request = cast(dict[str, str], http_client.calls[1]["data"])
     assert second_request["doInit"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_http_call_poller_uses_last_pos_when_event_cursor_missing() -> None:
+    """Ensure poller falls back to the envelope cursor when events omit it."""
+    expected_last_pos = 42.5
+    call_entry: dict[str, object] = {
+        "id": "5-6",
+        "systemId": 5,
+        "sid": 5,
+        "call_tg": 6,
+        "metadata": {},
+        "call_freq": 855.125,
+        "call-ttl": 1758450000,
+        "ts": 10,
+        "pos": None,
+    }
+    payload: dict[str, object] = {
+        "serverTime": 20,
+        "lastPos": expected_last_pos,
+        "calls": [call_entry],
+    }
+    http_client = RecordingHttpClient([payload])
+    poller = _HttpCallPoller(
+        TalkgroupSubscription(system_id=5, talkgroup_id=6),
+        http_client=http_client,
+        telemetry=NullTelemetrySink(),
+    )
+
+    events_iter, cursor = await poller.fetch(cursor=None)
+
+    assert cursor == expected_last_pos
+    events = list(events_iter)
+    assert len(events) == 1
+    assert events[0].cursor == expected_last_pos
+
+
+def test_format_call_event_renders_metadata_and_expiration() -> None:
+    """Verify CLI formatting surfaces key fields in a readable layout."""
+    received_at = datetime(2025, 9, 21, 13, 19, 53, tzinfo=UTC)
+    expires_at_epoch = received_at.timestamp() + 3600
+    metadata = CallMetadata(
+        channel=ChannelDescriptor(talkgroup_name="Fire Dispatch", service_tag="fire"),
+        extras=Extras(MappingProxyType({"source": "simulated"})),
+    )
+    call = Call(
+        call_id="7236-11185",
+        system_id=7236,
+        talkgroup_id=11185,
+        received_at=received_at,
+        frequency_mhz=851.0125,
+        metadata=metadata,
+        ttl_seconds=expires_at_epoch,
+    )
+    event = LiveCallEnvelope(
+        call=call,
+        cursor=1789996793.0,
+        received_at=received_at,
+        shard_key=(7236, 11185),
+        raw_payload=MappingProxyType({}),
+    )
+
+    formatted = format_call_event(event, metadata_limit=2)
+
+    assert "call 7236-11185" in formatted
+    assert "talkgroup 11185 (Fire Dispatch)" in formatted
+    assert "freq 851.0125 MHz" in formatted
+    assert "cursor 1789996793" in formatted
+    assert "expires" in formatted
+    assert "metadata:" in formatted

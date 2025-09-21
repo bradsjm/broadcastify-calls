@@ -90,7 +90,7 @@ def _decode_channel(values: dict[str, str]) -> ChannelDescriptor | None:
     service_description = _pop_first(values, "serviceDescription", "service_description")
     service_tag = _pop_first(values, "serviceTag", "service_tag", "serviceType", "service_type")
     system_name = _pop_first(values, "systemName", "system_name")
-    frequency_hz = _pop_float(values, "frequencyHz", "frequency_hz", "freq", "frequency")
+    frequency_mhz = _pop_float(values, "frequencyHz", "frequency_hz", "freq", "frequency")
     if all(
         item is None
         for item in (
@@ -98,7 +98,7 @@ def _decode_channel(values: dict[str, str]) -> ChannelDescriptor | None:
             service_description,
             service_tag,
             system_name,
-            frequency_hz,
+            frequency_mhz,
         )
     ):
         return None
@@ -107,7 +107,7 @@ def _decode_channel(values: dict[str, str]) -> ChannelDescriptor | None:
         service_description=service_description,
         service_tag=service_tag,
         system_name=system_name,
-        frequency_hz=frequency_hz,
+        frequency_mhz=frequency_mhz,
     )
 
 

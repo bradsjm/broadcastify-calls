@@ -89,7 +89,7 @@ class ChannelDescriptor:
     service_description: str | None = None
     service_tag: str | None = None
     system_name: str | None = None
-    frequency_hz: float | None = None
+    frequency_mhz: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +111,7 @@ class Call:
     system_id: SystemId
     talkgroup_id: TalkgroupId
     received_at: datetime
-    frequency_hz: float | None
+    frequency_mhz: float | None
     metadata: CallMetadata
     ttl_seconds: float | None = None
 
