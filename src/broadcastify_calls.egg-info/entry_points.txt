@@ -1,0 +1,2 @@
+[console_scripts]
+broadcastify_calls = broadcastify_client.cli:main

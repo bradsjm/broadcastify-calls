@@ -31,6 +31,9 @@ dependencies = [
     "pydantic>=2.7.0",
 ]
 
+[project.scripts]
+broadcastify_calls = "broadcastify_client.cli:main"
+
 [project.optional-dependencies]
 telemetry = [
     "opentelemetry-instrumentation-httpx>=0.47b0",

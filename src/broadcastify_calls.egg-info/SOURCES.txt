@@ -3,6 +3,7 @@ pyproject.toml
 src/broadcastify_calls.egg-info/PKG-INFO
 src/broadcastify_calls.egg-info/SOURCES.txt
 src/broadcastify_calls.egg-info/dependency_links.txt
+src/broadcastify_calls.egg-info/entry_points.txt
 src/broadcastify_calls.egg-info/requires.txt
 src/broadcastify_calls.egg-info/top_level.txt
 src/broadcastify_client/__init__.py
@@ -10,6 +11,7 @@ src/broadcastify_client/archives.py
 src/broadcastify_client/audio_consumer.py
 src/broadcastify_client/auth.py
 src/broadcastify_client/cache.py
+src/broadcastify_client/cli.py
 src/broadcastify_client/client.py
 src/broadcastify_client/config.py
 src/broadcastify_client/errors.py
@@ -20,5 +22,6 @@ src/broadcastify_client/models.py
 src/broadcastify_client/py.typed
 src/broadcastify_client/telemetry.py
 src/broadcastify_client/transcription.py
+tests/test_cli.py
 tests/test_client.py
 tests/test_config.py
