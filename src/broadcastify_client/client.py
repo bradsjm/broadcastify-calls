@@ -86,10 +86,12 @@ class CallPollerFactory(Protocol):
 
 @dataclass
 class ProducerHandle:
-    """Tracks the association between a producer and its execution task."""
+    """Tracks the association between a producer, its queue, and execution tasks."""
 
     producer: LiveCallProducer
+    topic: str
     task: asyncio.Task[None] | None = None
+    dispatch_task: asyncio.Task[None] | None = None
 
 
 @dataclass(slots=True)
@@ -228,6 +230,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._call_poller_factory = deps.call_poller_factory or _DefaultCallPollerFactory()
         self._producer_handles: list[ProducerHandle] = []
         self._started = False
+        self._live_topic = "calls.live"
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate using credentials or validate the provided session token."""
@@ -258,8 +261,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             http_client=self._http_client,
             telemetry=self._telemetry,
         )
-        producer = LiveCallProducer(poller, config, telemetry=self._telemetry)
-        handle = ProducerHandle(producer=producer)
+        queue: asyncio.Queue[CallEvent] = asyncio.Queue(maxsize=config.queue_maxsize or 0)
+        producer = LiveCallProducer(poller, config, telemetry=self._telemetry, queue=queue)
+        topic = f"{self._live_topic}.{system_id}.{talkgroup_id}"
+        handle = ProducerHandle(producer=producer, topic=topic)
         self._producer_handles.append(handle)
         if self._started:
             self._start_producer(handle)
@@ -288,11 +293,20 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         for handle in self._producer_handles:
             if handle.task is not None:
                 handle.task.cancel()
+            if handle.dispatch_task is not None:
+                handle.dispatch_task.cancel()
         for handle in self._producer_handles:
             if handle.task is None:
+                pass
+            else:
+                try:
+                    await handle.task
+                except asyncio.CancelledError:
+                    pass
+            if handle.dispatch_task is None:
                 continue
             try:
-                await handle.task
+                await handle.dispatch_task
             except asyncio.CancelledError:
                 pass
         await self._http_client.close()
@@ -303,6 +317,27 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         """Start the asynchronous task responsible for running *handle*'s producer."""
 
         handle.task = asyncio.create_task(handle.producer.run())
+        handle.dispatch_task = asyncio.create_task(self._dispatch_events(handle))
+
+    async def _dispatch_events(self, handle: ProducerHandle) -> None:
+        """Drain events from a producer queue and publish them to event bus topics."""
+
+        queue = handle.producer.queue
+        try:
+            while True:
+                event = await queue.get()
+                try:
+                    await self._event_bus.publish(self._live_topic, event)
+                    await self._event_bus.publish(handle.topic, event)
+                except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+                    self._telemetry.record_event(
+                        "live_producer.dispatch.error",
+                        attributes={"error_type": exc.__class__.__name__},
+                    )
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            return
 
 
 class _DefaultCallPollerFactory(CallPollerFactory):

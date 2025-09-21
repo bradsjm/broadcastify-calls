@@ -107,7 +107,7 @@ broadcastify_client/
 - **Headers:** Browser spoof template + `bcfyuser1` cookie.
 - **Async Flow:** `ArchiveClient.fetch(time_block)` first checks the async cache provider; on miss performs HTTP GET.
 - **Response Schema:** Expects `start`, `end`, `calls` array; missing `calls` triggers `ResponseParsingError`.
-- **Return Type:** `ArchiveResult(calls: list[Call], window: TimeWindow, from_cache: bool, raw: Mapping[str, Any])`.
+- **Return Type:** `ArchiveResult(calls: Sequence[Call], window: TimeWindow, fetched_at: datetime, cache_hit: bool, raw: Mapping[str, Any])`.
 
 ### 3.3 Live Call Streaming (Producer)
 
@@ -145,6 +145,7 @@ class LiveProducerConfig:
     max_retry_attempts: Optional[int] = None  # None => infinite retries within service lifetime
     rate_limit_per_minute: Optional[int] = None  # throttle outbound polls if configured
     metrics_interval: float = 60.0       # seconds between producer health emissions
+    initial_position: Optional[float] = None  # resume cursor in seconds (None => start fresh)
 ```
 
 - Defaults target a balance between responsiveness and Broadcastify friendliness; adjust `poll_interval` upward when monitoring calm talkgroups or to reduce API usage.
@@ -158,12 +159,15 @@ class LiveProducerConfig:
 @dataclass(frozen=True)
 class CallEvent:
     call: Call
+    cursor: Optional[float]
     received_at: datetime
     shard_key: tuple[int, int]  # (systemId, talkgroupId)
     raw_payload: Mapping[str, Any]
 ```
 
 - Events are enqueued onto `asyncio.Queue` (size configurable). Back-pressure is applied via queue size; when full, producer pauses until consumers drain items.
+- `BroadcastifyClient` forwards each dequeued event to the event bus on two topics: the shared channel `"calls.live"` and a shard-specific channel `f"calls.live.{systemId}.{talkgroupId}"`, enabling coarse and fine-grained subscribers without additional wiring.
+- Telemetry metrics exposed from the producer loop include `live_producer.dispatched` (per poll) and a periodic `live_producer.queue_depth` gauge controlled by `metrics_interval`.
 
 ### 3.4 Audio Pipeline (Consumer)
 

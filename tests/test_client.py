@@ -249,11 +249,31 @@ async def test_create_live_producer_emits_events_once_started() -> None:
     )
     client = BroadcastifyClient(dependencies=dependencies)
 
-    producer = await client.create_live_producer(system_id=1, talkgroup_id=2)
+    received_general: list[CallEvent] = []
+    received_specific: list[CallEvent] = []
+    general_event = asyncio.Event()
+    specific_event = asyncio.Event()
+
+    async def general_consumer(event: object) -> None:
+        assert isinstance(event, CallEvent)
+        received_general.append(event)
+        general_event.set()
+
+    async def specific_consumer(event: object) -> None:
+        assert isinstance(event, CallEvent)
+        received_specific.append(event)
+        specific_event.set()
+
+    await client.register_consumer("calls.live", general_consumer)
+    await client.register_consumer("calls.live.1.2", specific_consumer)
+
+    await client.create_live_producer(system_id=1, talkgroup_id=2)
     await client.start()
     try:
-        received = await asyncio.wait_for(producer.queue.get(), timeout=0.5)
-        assert received.call.call_id == EXPECTED_CALL_ID
+        await asyncio.wait_for(general_event.wait(), timeout=1.0)
+        await asyncio.wait_for(specific_event.wait(), timeout=1.0)
+        assert received_general[0].call.call_id == EXPECTED_CALL_ID
+        assert received_specific[0].call.call_id == EXPECTED_CALL_ID
         assert poller_factory.pollers[0].invocations >= 1
     finally:
         await client.shutdown()
