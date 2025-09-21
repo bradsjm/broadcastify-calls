@@ -17,7 +17,7 @@ from .client import BroadcastifyClient
 from .config import Credentials, load_credentials_from_environment
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
-from .models import CallMetadata, LiveCallEnvelope
+from .models import CallMetadata, LiveCallEnvelope, SourceDescriptor
 
 LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
@@ -169,24 +169,33 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
     """Return a single-line summary for *event* limited to *metadata_limit* entries."""
     call = event.call
     timestamp = _format_timestamp(call.received_at)
-    talkgroup = _format_talkgroup(call.talkgroup_id, call.metadata)
+    system_text = _format_system(call.system_name, call.system_id)
+    group_text = _format_group(call.talkgroup_label, call.talkgroup_id)
+    source_text = _format_source(call.source)
+    duration_text = _format_duration(call.duration_seconds)
     frequency = _format_frequency(call.frequency_mhz)
     cursor = _format_cursor(event.cursor)
     expires_at = _format_expiration(call.ttl_seconds)
     components = [
         timestamp,
-        f"call {call.call_id}",
-        f"system {call.system_id}",
-        f"talkgroup {talkgroup}",
+        system_text,
+        group_text,
+        source_text,
+        f"duration {duration_text}",
         f"freq {frequency}",
         f"cursor {cursor}",
     ]
     if expires_at is not None:
         components.append(f"expires {expires_at}")
     header = " | ".join(components)
+    detail_lines: list[str] = []
+    if call.talkgroup_description:
+        detail_lines.append(f"  description: {call.talkgroup_description}")
     metadata_text = _format_metadata(call.metadata, metadata_limit)
     if metadata_text:
-        return f"{header}\n  metadata: {metadata_text}"
+        detail_lines.append(f"  metadata: {metadata_text}")
+    if detail_lines:
+        return "\n".join([header, *detail_lines])
     return header
 
 
@@ -242,11 +251,33 @@ def _format_expiration(value: float | None) -> str | None:
     return expires_at.isoformat()
 
 
-def _format_talkgroup(talkgroup_id: int, metadata: CallMetadata) -> str:
-    talkgroup_name = metadata.channel.talkgroup_name if metadata.channel else None
-    if talkgroup_name and talkgroup_name != str(talkgroup_id):
-        return f"{talkgroup_id} ({talkgroup_name})"
-    return str(talkgroup_id)
+def _format_system(system_name: str | None, system_id: int) -> str:
+    if system_name:
+        return f"{system_name} ({system_id})"
+    return f"System {system_id}"
+
+
+def _format_group(talkgroup_label: str | None, talkgroup_id: int) -> str:
+    if talkgroup_label:
+        return f"{talkgroup_label} ({talkgroup_id})"
+    return f"Talkgroup {talkgroup_id}"
+
+
+def _format_source(source: SourceDescriptor) -> str:
+    identifier = "-" if source.identifier is None else str(source.identifier)
+    if source.label:
+        return f"{source.label} ({identifier})"
+    if source.identifier is not None:
+        return f"Unit ({identifier})"
+    return f"Source ({identifier})"
+
+
+def _format_duration(value: float | None) -> str:
+    if value is None:
+        return "-"
+    if float(value).is_integer():
+        return f"{int(value)}s"
+    return f"{value:.1f}s"
 
 
 def _format_metadata(metadata: CallMetadata, limit: int) -> str:

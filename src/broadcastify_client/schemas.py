@@ -22,10 +22,50 @@ class LiveCallEntry(BaseModel):
         default_factory=dict,
         description="Structured metadata provided alongside the call.",
     )
+    grouping: str | None = Field(
+        default=None,
+        alias="grouping",
+        description="Human-readable system or agency name associated with the call.",
+    )
+    display: str | None = Field(
+        default=None,
+        alias="display",
+        description="Talkgroup alias presented in the Broadcastify UI.",
+    )
+    descr: str | None = Field(
+        default=None,
+        alias="descr",
+        description="Talkgroup descriptive label used in the Broadcastify UI.",
+    )
+    call_duration: float | None = Field(
+        default=None,
+        alias="call_duration",
+        description="Length of the call in seconds as emitted by Broadcastify.",
+    )
     call_freq: float | None = Field(
         default=None,
         alias="call_freq",
         description="Reported frequency in megahertz.",
+    )
+    call_src: int | None = Field(
+        default=None,
+        alias="call_src",
+        description="Identifier for the originating source unit.",
+    )
+    call_src_descr: str | None = Field(
+        default=None,
+        alias="call_src_descr",
+        description="Optional human-readable label for the source unit.",
+    )
+    call_type: int | None = Field(
+        default=None,
+        alias="call_type",
+        description="Broadcastify call classification code.",
+    )
+    tag: int | None = Field(
+        default=None,
+        alias="tag",
+        description="Service tag identifier as displayed in the Broadcastify UI.",
     )
     call_ttl: float | None = Field(
         default=None,

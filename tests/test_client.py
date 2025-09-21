@@ -31,7 +31,7 @@ from broadcastify_client.client import (
 )
 from broadcastify_client.http import AsyncHttpClientProtocol
 from broadcastify_client.live_producer import CallPoller
-from broadcastify_client.models import CallMetadata, ChannelDescriptor, Extras
+from broadcastify_client.models import CallMetadata, ChannelDescriptor, Extras, SourceDescriptor
 from broadcastify_client.telemetry import NullTelemetrySink, TelemetrySink
 
 TEST_USERNAME = "alice"
@@ -195,9 +195,14 @@ async def test_authenticate_with_credentials_caches_token() -> None:
     base_call = Call(
         call_id="1-2",
         system_id=1,
+        system_name=None,
         talkgroup_id=2,
+        talkgroup_label=None,
+        talkgroup_description=None,
         received_at=datetime.now(UTC),
         frequency_mhz=None,
+        duration_seconds=None,
+        source=SourceDescriptor(),
         metadata=CallMetadata(),
     )
     poller_factory = StubCallPollerFactory(
@@ -249,9 +254,14 @@ async def test_get_archived_calls_uses_archive_client() -> None:
     call_instance = Call(
         call_id="3-4",
         system_id=3,
+        system_name=None,
         talkgroup_id=4,
+        talkgroup_label=None,
+        talkgroup_description=None,
         received_at=datetime.now(UTC),
         frequency_mhz=None,
+        duration_seconds=None,
+        source=SourceDescriptor(),
         metadata=CallMetadata(),
     )
     event = LiveCallEnvelope(
@@ -295,9 +305,14 @@ async def test_create_live_producer_emits_events_once_started() -> None:
     call_payload = Call(
         call_id=EXPECTED_CALL_ID,
         system_id=1,
+        system_name=None,
         talkgroup_id=2,
+        talkgroup_label=None,
+        talkgroup_description=None,
         received_at=datetime.now(UTC),
         frequency_mhz=851.0125,
+        duration_seconds=None,
+        source=SourceDescriptor(),
         metadata=CallMetadata(),
     )
     call_event = LiveCallEnvelope(
@@ -365,9 +380,14 @@ async def test_audio_pipeline_publishes_chunks() -> None:
     call_payload = Call(
         call_id=EXPECTED_CALL_ID,
         system_id=1,
+        system_name=None,
         talkgroup_id=2,
+        talkgroup_label=None,
+        talkgroup_description=None,
         received_at=datetime.now(UTC),
         frequency_mhz=851.0125,
+        duration_seconds=None,
+        source=SourceDescriptor(),
         metadata=CallMetadata(),
     )
     call_event = LiveCallEnvelope(
@@ -465,6 +485,12 @@ async def test_http_call_poller_parses_events() -> None:
     expected_last_pos = 15.0
     expected_frequency = 851.0125
     expected_cursor = 12.5
+    expected_system_name = "Sample System"
+    expected_group_label = "Alpha Tag"
+    expected_group_description = "Talkgroup Description"
+    expected_source_id = 7001
+    expected_source_label = "Engine 5"
+    expected_duration = 9.0
     next_cursor_value = 18.0
     call_entry: dict[str, object] = {
         "id": "1-2",
@@ -472,9 +498,15 @@ async def test_http_call_poller_parses_events() -> None:
         "sid": 1,
         "call_tg": 2,
         "metadata": {"foo": "bar"},
+        "grouping": expected_system_name,
+        "display": expected_group_label,
+        "descr": expected_group_description,
+        "call_duration": expected_duration,
         "call_freq": expected_frequency,
         "call-ttl": 1758450000,
         "ts": 10,
+        "call_src": expected_source_id,
+        "call_src_descr": expected_source_label,
         "pos": expected_cursor,
     }
     first_payload: dict[str, object] = {
@@ -564,9 +596,14 @@ def test_format_call_event_renders_metadata_and_expiration() -> None:
     call = Call(
         call_id="7236-11185",
         system_id=7236,
+        system_name="Pinellas County Fire-EMS",
         talkgroup_id=11185,
+        talkgroup_label="FD 1A",
+        talkgroup_description="Fire Dispatch",
         received_at=received_at,
         frequency_mhz=851.0125,
+        duration_seconds=3600.0,
+        source=SourceDescriptor(identifier=706111, label="Engine 1"),
         metadata=metadata,
         ttl_seconds=expires_at_epoch,
     )

@@ -14,7 +14,7 @@ from .config import CacheConfig
 from .errors import ResponseParsingError
 from .http import AsyncHttpClientProtocol
 from .metadata import parse_call_metadata
-from .models import ArchiveCallEnvelope, ArchiveResult, Call, TimeWindow
+from .models import ArchiveCallEnvelope, ArchiveResult, Call, SourceDescriptor, TimeWindow
 from .schemas import ArchiveCallEntry, ArchiveCallsResponse
 
 logger = logging.getLogger(__name__)
@@ -116,9 +116,14 @@ class JsonArchiveParser(ArchiveParser):
         call = Call(
             call_id=entry.id,
             system_id=entry.system_id,
+            system_name=None,
             talkgroup_id=entry.call_tg,
+            talkgroup_label=None,
+            talkgroup_description=None,
             received_at=datetime.fromtimestamp(entry.ts, UTC),
             frequency_mhz=entry.call_freq,
+            duration_seconds=None,
+            source=SourceDescriptor(),
             metadata=metadata,
             ttl_seconds=entry.call_ttl,
         )

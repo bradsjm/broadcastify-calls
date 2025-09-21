@@ -93,6 +93,14 @@ class ChannelDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceDescriptor:
+    """Descriptor for the originating source unit of a call."""
+
+    identifier: int | None = None
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CallMetadata:
     """Structured metadata associated with a call."""
 
@@ -109,9 +117,14 @@ class Call:
 
     call_id: CallId
     system_id: SystemId
+    system_name: str | None
     talkgroup_id: TalkgroupId
+    talkgroup_label: str | None
+    talkgroup_description: str | None
     received_at: datetime
     frequency_mhz: float | None
+    duration_seconds: float | None
+    source: SourceDescriptor
     metadata: CallMetadata
     ttl_seconds: float | None = None
 

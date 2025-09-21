@@ -33,6 +33,7 @@ from .models import (
     RuntimeMetrics,
     SearchResultPage,
     SessionToken,
+    SourceDescriptor,
     SystemSummary,
     TalkgroupSummary,
 )
@@ -746,12 +747,91 @@ def _generate_session_key() -> str:
 
 def _parse_live_call(entry: LiveCallEntry) -> Call:
     metadata = parse_call_metadata(entry.metadata)
+    metadata_payload = entry.metadata
+
+    system_name = _coerce_str(
+        entry.grouping,
+        metadata_payload.get("talkgroup_group"),
+        metadata_payload.get("short_name"),
+    )
+    talkgroup_label = _coerce_str(
+        entry.display,
+        metadata_payload.get("talkgroup_tag"),
+        metadata_payload.get("talkgroup"),
+    )
+    talkgroup_description = _coerce_str(
+        entry.descr,
+        metadata_payload.get("talkgroup_description"),
+    )
+    duration_seconds = _coerce_float(
+        entry.call_duration,
+        metadata_payload.get("call_length"),
+    )
+    source = _extract_source_descriptor(entry)
+
     return Call(
         call_id=entry.id,
         system_id=entry.system_id,
+        system_name=system_name,
         talkgroup_id=entry.call_tg,
+        talkgroup_label=talkgroup_label,
+        talkgroup_description=talkgroup_description,
         received_at=datetime.fromtimestamp(entry.ts, UTC),
         frequency_mhz=entry.call_freq,
+        duration_seconds=duration_seconds,
+        source=source,
         metadata=metadata,
         ttl_seconds=entry.call_ttl,
     )
+
+
+def _extract_source_descriptor(entry: LiveCallEntry) -> SourceDescriptor:
+    identifier = entry.call_src
+    label = entry.call_src_descr
+
+    metadata_sources = entry.metadata.get("srcList")
+    if isinstance(metadata_sources, Sequence) and metadata_sources:
+        first = metadata_sources[0]
+        if isinstance(first, Mapping):
+            if identifier is None:
+                raw_identifier = first.get("src")
+                try:
+                    identifier = int(raw_identifier) if raw_identifier is not None else None
+                except (TypeError, ValueError):
+                    identifier = None
+            if label in (None, ""):
+                label_candidate = first.get("tag")
+                coerced = _coerce_str(label_candidate)
+                if coerced is not None:
+                    label = coerced
+
+    if label in (None, ""):
+        extra_label = entry.metadata.get("call_src_descr")
+        coerced = _coerce_str(extra_label)
+        if coerced is not None:
+            label = coerced
+
+    return SourceDescriptor(identifier=identifier, label=_coerce_str(label))
+
+
+def _coerce_str(*values: object | None) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _coerce_float(*values: object | None) -> float | None:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value))
+        except (TypeError, ValueError):
+            continue
+    return None
