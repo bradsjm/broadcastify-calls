@@ -174,6 +174,7 @@ class CallEvent:
 - `AudioConsumer` subscribes to `CallEvent` queue, downloads MP3 via async streaming (`httpx.AsyncClient.stream()` or equivalent) with spoof headers.
 - Emits `AudioChunkEvent` objects containing call metadata plus streamed bytes, enabling multiple downstream consumers.
 - Supports retry policy, bandwidth throttling, and optional deduplication via persistent store.
+- The client republishes chunks on `calls.audio` and per-call channels `calls.audio.{callId}`, mirroring the live-call topic topology for downstream consumers (transcription, storage, analytics).
 
 ### 3.5 Near Real-Time Transcription
 

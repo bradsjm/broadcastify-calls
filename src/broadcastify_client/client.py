@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Protocol, cast
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
+from .audio_consumer import AudioConsumer
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import Credentials, HttpClientConfig, LiveProducerConfig
-from .errors import LiveSessionError
+from .errors import AudioDownloadError, LiveSessionError
 from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
-from .models import ArchiveResult, Call, CallEvent, SessionToken
+from .models import ArchiveResult, AudioChunkEvent, Call, CallEvent, SessionToken
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 
@@ -84,6 +85,12 @@ class CallPollerFactory(Protocol):
         ...
 
 
+def _create_task_set() -> set[asyncio.Task[None]]:
+    """Return a new empty set for tracking asyncio tasks."""
+
+    return set()
+
+
 @dataclass
 class ProducerHandle:
     """Tracks the association between a producer, its queue, and execution tasks."""
@@ -92,6 +99,10 @@ class ProducerHandle:
     topic: str
     task: asyncio.Task[None] | None = None
     dispatch_task: asyncio.Task[None] | None = None
+    audio_consumer: AudioConsumer | None = None
+    audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
+    audio_dispatch_task: asyncio.Task[None] | None = None
+    audio_tasks: set[asyncio.Task[None]] = field(default_factory=_create_task_set)
 
 
 @dataclass(slots=True)
@@ -107,6 +118,7 @@ class BroadcastifyClientDependencies:
     event_bus: EventBus | None = None
     telemetry: TelemetrySink | None = None
     call_poller_factory: CallPollerFactory | None = None
+    audio_consumer_factory: Callable[[], AudioConsumer] | None = None
 
 
 class _HttpCallPoller(CallPoller):
@@ -228,9 +240,11 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._archive_client = deps.archive_client or ArchiveClient(self._http_client, parser)
         self._event_bus = deps.event_bus or EventBus()
         self._call_poller_factory = deps.call_poller_factory or _DefaultCallPollerFactory()
+        self._audio_consumer_factory = deps.audio_consumer_factory
         self._producer_handles: list[ProducerHandle] = []
         self._started = False
         self._live_topic = "calls.live"
+        self._audio_topic = "calls.audio"
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate using credentials or validate the provided session token."""
@@ -264,7 +278,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         queue: asyncio.Queue[CallEvent] = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         producer = LiveCallProducer(poller, config, telemetry=self._telemetry, queue=queue)
         topic = f"{self._live_topic}.{system_id}.{talkgroup_id}"
-        handle = ProducerHandle(producer=producer, topic=topic)
+        audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
+        audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
+        if audio_consumer is not None:
+            audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
+        handle = ProducerHandle(
+            producer=producer,
+            topic=topic,
+            audio_consumer=audio_consumer,
+            audio_queue=audio_queue,
+        )
         self._producer_handles.append(handle)
         if self._started:
             self._start_producer(handle)
@@ -291,24 +314,9 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         for handle in self._producer_handles:
             await handle.producer.stop()
         for handle in self._producer_handles:
-            if handle.task is not None:
-                handle.task.cancel()
-            if handle.dispatch_task is not None:
-                handle.dispatch_task.cancel()
+            self._cancel_handle_tasks(handle)
         for handle in self._producer_handles:
-            if handle.task is None:
-                pass
-            else:
-                try:
-                    await handle.task
-                except asyncio.CancelledError:
-                    pass
-            if handle.dispatch_task is None:
-                continue
-            try:
-                await handle.dispatch_task
-            except asyncio.CancelledError:
-                pass
+            await self._await_handle_tasks(handle)
         await self._http_client.close()
         self._producer_handles.clear()
         self._started = False
@@ -318,6 +326,8 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
 
         handle.task = asyncio.create_task(handle.producer.run())
         handle.dispatch_task = asyncio.create_task(self._dispatch_events(handle))
+        if handle.audio_queue is not None and handle.audio_consumer is not None:
+            handle.audio_dispatch_task = asyncio.create_task(self._dispatch_audio_chunks(handle))
 
     async def _dispatch_events(self, handle: ProducerHandle) -> None:
         """Drain events from a producer queue and publish them to event bus topics."""
@@ -329,6 +339,14 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 try:
                     await self._event_bus.publish(self._live_topic, event)
                     await self._event_bus.publish(handle.topic, event)
+                    if handle.audio_consumer is not None and handle.audio_queue is not None:
+                        audio_task = asyncio.create_task(self._consume_audio(handle, event))
+
+                        def _remove(task: asyncio.Task[None]) -> None:
+                            handle.audio_tasks.discard(task)
+
+                        handle.audio_tasks.add(audio_task)
+                        audio_task.add_done_callback(_remove)
                 except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
                     self._telemetry.record_event(
                         "live_producer.dispatch.error",
@@ -338,6 +356,72 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                     queue.task_done()
         except asyncio.CancelledError:
             return
+
+    async def _consume_audio(self, handle: ProducerHandle, event: CallEvent) -> None:
+        """Trigger audio download for *event* via the configured consumer."""
+
+        assert handle.audio_consumer is not None
+        assert handle.audio_queue is not None
+        try:
+            await handle.audio_consumer.consume(event, handle.audio_queue)
+        except AudioDownloadError as exc:
+            self._telemetry.record_event(
+                "audio_consumer.error",
+                attributes={
+                    "error_type": exc.__class__.__name__,
+                    "call_id": event.call.call_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+            self._telemetry.record_event(
+                "audio_consumer.error",
+                attributes={
+                    "error_type": exc.__class__.__name__,
+                    "call_id": event.call.call_id,
+                },
+            )
+
+    async def _dispatch_audio_chunks(self, handle: ProducerHandle) -> None:
+        """Publish audio chunks produced for a given handle."""
+
+        assert handle.audio_queue is not None
+        queue = handle.audio_queue
+        try:
+            while True:
+                chunk = await queue.get()
+                try:
+                    await self._event_bus.publish(self._audio_topic, chunk)
+                    await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
+                except Exception as exc:  # noqa: BLE001 pragma: no cover - defensive path
+                    self._telemetry.record_event(
+                        "audio_dispatch.error",
+                        attributes={"error_type": exc.__class__.__name__},
+                    )
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            return
+
+    def _cancel_handle_tasks(self, handle: ProducerHandle) -> None:
+        for task in (handle.task, handle.dispatch_task, handle.audio_dispatch_task):
+            if task is not None:
+                task.cancel()
+        for task in list(handle.audio_tasks):
+            task.cancel()
+
+    async def _await_handle_tasks(self, handle: ProducerHandle) -> None:
+        for task in (handle.task, handle.dispatch_task, handle.audio_dispatch_task):
+            await self._await_optional_task(task)
+        for task in list(handle.audio_tasks):
+            await self._await_optional_task(task)
+
+    async def _await_optional_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is None:
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class _DefaultCallPollerFactory(CallPollerFactory):

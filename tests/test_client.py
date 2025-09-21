@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import cast
@@ -11,6 +11,7 @@ import pytest
 
 from broadcastify_client import (
     ArchiveResult,
+    AudioChunkEvent,
     BroadcastifyClient,
     Call,
     CallEvent,
@@ -19,6 +20,7 @@ from broadcastify_client import (
     TimeWindow,
 )
 from broadcastify_client.archives import ArchiveClient
+from broadcastify_client.audio_consumer import AudioConsumer
 from broadcastify_client.client import (
     BroadcastifyClientDependencies,
     _HttpCallPoller,  # pyright: ignore[reportPrivateUsage]
@@ -112,6 +114,36 @@ class StubCallPollerFactory:
         poller = StubCallPoller(self.event)
         self.pollers.append(poller)
         return poller
+
+
+class StubAudioDownloader:
+    def __init__(self) -> None:
+        self.requests: list[int] = []
+
+    async def fetch_audio(self, call: CallEvent) -> AsyncIterator[AudioChunkEvent]:
+        self.requests.append(call.call.call_id)
+
+        async def _iterator() -> AsyncIterator[AudioChunkEvent]:
+            yield AudioChunkEvent(
+                call_id=call.call.call_id,
+                sequence=1,
+                start_offset=0.0,
+                end_offset=1.0,
+                payload=b"chunk-1",
+                content_type="audio/mpeg",
+                finished=False,
+            )
+            yield AudioChunkEvent(
+                call_id=call.call.call_id,
+                sequence=2,
+                start_offset=1.0,
+                end_offset=2.0,
+                payload=b"chunk-2",
+                content_type="audio/mpeg",
+                finished=True,
+            )
+
+        return _iterator()
 
 
 @pytest.mark.asyncio
@@ -275,6 +307,77 @@ async def test_create_live_producer_emits_events_once_started() -> None:
         assert received_general[0].call.call_id == EXPECTED_CALL_ID
         assert received_specific[0].call.call_id == EXPECTED_CALL_ID
         assert poller_factory.pollers[0].invocations >= 1
+    finally:
+        await client.shutdown()
+    assert archive_client_stub.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_audio_pipeline_publishes_chunks() -> None:
+    backend = StubAuthenticationBackend()
+    now = datetime.now(UTC)
+    archive_result = ArchiveResult(
+        calls=[],
+        window=TimeWindow(start=now, end=now + timedelta(minutes=5)),
+        fetched_at=now,
+        cache_hit=False,
+        raw=MappingProxyType({}),
+    )
+    archive_client_stub = StubArchiveClient(archive_result)
+    archive_client = cast(ArchiveClient, archive_client_stub)
+    call_payload = Call(
+        call_id=EXPECTED_CALL_ID,
+        system_id=1,
+        talkgroup_id=2,
+        received_at=datetime.now(UTC),
+        frequency_hz=851.0125,
+        metadata={},
+    )
+    call_event = CallEvent(
+        call=call_payload,
+        cursor=12.0,
+        received_at=datetime.now(UTC),
+        shard_key=(1, 2),
+        raw_payload=MappingProxyType({}),
+    )
+    poller_factory = StubCallPollerFactory(call_event)
+    downloader = StubAudioDownloader()
+    dependencies = BroadcastifyClientDependencies(
+        authentication_backend=backend,
+        archive_client=archive_client,
+        http_client=StubHttpClient(),
+        call_poller_factory=poller_factory,
+        audio_consumer_factory=lambda: AudioConsumer(downloader, telemetry=NullTelemetrySink()),
+    )
+    client = BroadcastifyClient(dependencies=dependencies)
+
+    audio_general_event = asyncio.Event()
+    audio_specific_event = asyncio.Event()
+    received_audio_general: list[AudioChunkEvent] = []
+    received_audio_specific: list[AudioChunkEvent] = []
+
+    async def audio_general_consumer(event: object) -> None:
+        assert isinstance(event, AudioChunkEvent)
+        received_audio_general.append(event)
+        audio_general_event.set()
+
+    async def audio_specific_consumer(event: object) -> None:
+        assert isinstance(event, AudioChunkEvent)
+        received_audio_specific.append(event)
+        if event.finished:
+            audio_specific_event.set()
+
+    await client.register_consumer("calls.audio", audio_general_consumer)
+    await client.register_consumer(f"calls.audio.{EXPECTED_CALL_ID}", audio_specific_consumer)
+
+    await client.create_live_producer(system_id=1, talkgroup_id=2)
+    await client.start()
+    try:
+        await asyncio.wait_for(audio_general_event.wait(), timeout=1.0)
+        await asyncio.wait_for(audio_specific_event.wait(), timeout=1.0)
+        assert received_audio_general[0].call_id == EXPECTED_CALL_ID
+        assert received_audio_specific[-1].finished is True
+        assert downloader.requests == [EXPECTED_CALL_ID]
     finally:
         await client.shutdown()
     assert archive_client_stub.calls == 0
