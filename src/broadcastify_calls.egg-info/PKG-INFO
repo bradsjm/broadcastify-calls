@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: broadcastify-calls
 Version: 0.1.0
 Summary: Async Broadcastify client scaffolding for consuming live and archived call feeds.
-Author: Broadcastify Calls Team
+Author: Jonathan Bradshaw
 License: UNLICENSED
 Keywords: broadcastify,asyncio,event-driven,audio,telemetry
 Classifier: Development Status :: 2 - Pre-Alpha

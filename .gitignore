@@ -17,3 +17,6 @@ htmlcov/
 
 # uv
 uv.lock
+
+# Environment
+.env

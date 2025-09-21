@@ -72,7 +72,6 @@ ignore = ["S101"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["broadcastify_client"]
-combined-as-imports = true
 
 [tool.ruff.format]
 preview = true
