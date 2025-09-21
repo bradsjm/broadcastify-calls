@@ -22,6 +22,7 @@ from .models import (
     Call,
     CallEvent,
     SessionToken,
+    TimeWindow,
     TranscriptionPartial,
     TranscriptionResult,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "HttpClientConfig",
     "LiveProducerConfig",
     "SessionToken",
+    "TimeWindow",
     "TranscriptionConfig",
     "TranscriptionPartial",
     "TranscriptionResult",

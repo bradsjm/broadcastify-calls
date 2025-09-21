@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import UTC, datetime
+from types import MappingProxyType
+from typing import Any, Protocol, cast
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import Credentials, HttpClientConfig, LiveProducerConfig
+from .errors import LiveSessionError
 from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
-from .models import ArchiveResult, CallEvent, SessionToken
+from .models import ArchiveResult, Call, CallEvent, SessionToken
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 
@@ -39,7 +44,7 @@ class AsyncBroadcastifyClient(Protocol):
         ...
 
     async def create_live_producer(
-        self, system_id: int, talkgroup_id: int, *, position: int | None = None
+        self, system_id: int, talkgroup_id: int, *, position: float | None = None
     ) -> LiveCallProducer:  # pragma: no cover - protocol
         """Create a live call producer for the given talkgroup."""
 
@@ -103,7 +108,9 @@ class BroadcastifyClientDependencies:
 
 
 class _HttpCallPoller(CallPoller):
-    """Placeholder HTTP poller returning no events until implemented."""
+    """HTTP-backed poller that surfaces Broadcastify live call events."""
+
+    _LIVE_ENDPOINT = "/calls/apis/live-calls"
 
     def __init__(
         self,
@@ -112,25 +119,89 @@ class _HttpCallPoller(CallPoller):
         http_client: AsyncHttpClientProtocol,
         telemetry: TelemetrySink,
     ) -> None:
-        """Create a placeholder HTTP poller for *system_id* and *talkgroup_id*."""
+        """Create a poller for *system_id* and *talkgroup_id*."""
 
         self._system_id = system_id
         self._talkgroup_id = talkgroup_id
         self._http_client = http_client
         self._telemetry = telemetry
+        self._session_key = _generate_session_key()
+        self._initialised = False
 
-    async def fetch(self, *, cursor: int | None) -> tuple[list[CallEvent], int | None]:
-        """Return no events; future iterations will call the Broadcastify feed."""
+    async def fetch(self, *, cursor: float | None) -> tuple[list[CallEvent], float | None]:
+        """Return new call events and the updated cursor."""
 
-        self._telemetry.record_event(
-            "live_producer.poll",
-            attributes={
-                "system_id": self._system_id,
-                "talkgroup_id": self._talkgroup_id,
-                "cursor": cursor,
-            },
-        )
-        return [], cursor
+        position = float(cursor) if cursor is not None else 0.0
+        form_payload = {
+            "groups[]": f"{self._system_id}-{self._talkgroup_id}",
+            "pos": f"{position:.3f}",
+            "doInit": "1" if not self._initialised else "0",
+            "systemId": "0",
+            "sid": "0",
+            "sessionKey": self._session_key,
+        }
+
+        response = await self._http_client.post_form(self._LIVE_ENDPOINT, data=form_payload)
+
+        try:
+            payload = cast(dict[str, Any], response.json())
+        except ValueError as exc:  # pragma: no cover - defensive path
+            raise LiveSessionError("Live call payload was not valid JSON") from exc
+
+        session_key = payload.get("sessionKey")
+        if isinstance(session_key, str) and session_key:
+            self._session_key = session_key
+
+        events = self._parse_events(payload)
+        next_cursor = self._calculate_cursor(payload, events, position)
+        self._initialised = True
+
+        self._telemetry.record_metric("live_producer.poll.events", float(len(events)))
+        return events, next_cursor
+
+    def _parse_events(self, payload: Mapping[str, Any]) -> list[CallEvent]:
+        calls_payload = payload.get("calls", [])
+        if not isinstance(calls_payload, list):
+            raise LiveSessionError("Live call payload missing 'calls' array")
+
+        typed_calls = cast(list[Mapping[str, Any]], calls_payload)
+        events: list[CallEvent] = []
+        now = datetime.now(UTC)
+        for entry in typed_calls:
+            call = _parse_live_call(entry, self._system_id, self._talkgroup_id)
+            cursor = _coerce_optional_float(entry.get("pos") or entry.get("position"))
+            events.append(
+                CallEvent(
+                    call=call,
+                    cursor=cursor,
+                    received_at=now,
+                    shard_key=(self._system_id, self._talkgroup_id),
+                    raw_payload=MappingProxyType({str(key): value for key, value in entry.items()}),
+                )
+            )
+        return events
+
+    def _calculate_cursor(
+        self,
+        payload: Mapping[str, Any],
+        events: list[CallEvent],
+        current: float,
+    ) -> float | None:
+        candidates: list[float] = []
+        for event in events:
+            if event.cursor is not None:
+                candidates.append(float(event.cursor))
+            candidates.append(event.call.received_at.timestamp() + 1.0)
+
+        last_pos = _coerce_optional_float(payload.get("lastPos") or payload.get("lastpos"))
+        if last_pos is not None:
+            candidates.append(last_pos)
+
+        candidates.append(current)
+
+        if not candidates:
+            return current
+        return max(candidates)
 
 
 class BroadcastifyClient(AsyncBroadcastifyClient):
@@ -173,12 +244,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     ) -> ArchiveResult:
         """Return archived calls for the given identifiers."""
 
-        return await self._archive_client.get_archived_calls(
-            system_id, talkgroup_id, time_block
-        )
+        return await self._archive_client.get_archived_calls(system_id, talkgroup_id, time_block)
 
     async def create_live_producer(
-        self, system_id: int, talkgroup_id: int, *, position: int | None = None
+        self, system_id: int, talkgroup_id: int, *, position: float | None = None
     ) -> LiveCallProducer:
         """Create and register a live call producer."""
 
@@ -250,3 +319,108 @@ class _DefaultCallPollerFactory(CallPollerFactory):
         """Return an HTTP-based poller for the given identifiers."""
 
         return _HttpCallPoller(system_id, talkgroup_id, http_client, telemetry)
+
+
+def _generate_session_key() -> str:
+    """Return a random session key accepted by the Broadcastify endpoint."""
+
+    return secrets.token_hex(16)
+
+
+def _parse_live_call(
+    entry: Mapping[str, Any],
+    fallback_system_id: int,
+    fallback_talkgroup_id: int,
+) -> Call:
+    call_id = _coerce_int(entry.get("id") or entry.get("callId"), "id")
+    system_id = _coerce_optional_int(entry.get("system_id") or entry.get("systemId"))
+    talkgroup_id = _coerce_optional_int(entry.get("talkgroup_id") or entry.get("talkgroupId"))
+
+    resolved_system_id = system_id if system_id is not None else fallback_system_id
+    resolved_talkgroup_id = talkgroup_id if talkgroup_id is not None else fallback_talkgroup_id
+
+    received_at_value: Any = entry.get("received_at")
+    if received_at_value is None:
+        received_at_value = entry.get("start_time")
+    if received_at_value is None:
+        received_at_value = entry.get("start")
+    if received_at_value is None:
+        received_at_value = entry.get("timestamp")
+    if received_at_value is None:
+        raise LiveSessionError("Live call entry missing receipt timestamp")
+
+    frequency_hz = _coerce_optional_float(
+        entry.get("frequency_hz") or entry.get("call_freq") or entry.get("frequencyHz")
+    )
+    ttl_seconds = _coerce_optional_float(entry.get("call_ttl") or entry.get("ttl"))
+    metadata = _normalize_metadata(entry.get("metadata"))
+
+    return Call(
+        call_id=call_id,
+        system_id=resolved_system_id,
+        talkgroup_id=resolved_talkgroup_id,
+        received_at=_parse_datetime(received_at_value),
+        frequency_hz=frequency_hz,
+        metadata=metadata,
+        ttl_seconds=ttl_seconds,
+        raw=MappingProxyType({str(key): value for key, value in entry.items()}),
+    )
+
+
+def _coerce_int(value: Any, field: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise LiveSessionError(f"Live call entry missing valid '{field}'") from exc
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise LiveSessionError("Boolean cannot represent integer cursor")
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise LiveSessionError(f"Invalid integer value: {value!r}") from exc
+    raise LiveSessionError(f"Unsupported integer value: {value!r}")
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise LiveSessionError("Boolean cannot represent float cursor")
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise LiveSessionError(f"Invalid float value: {value!r}") from exc
+    raise LiveSessionError(f"Unsupported float value: {value!r}")
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=UTC)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            try:
+                return datetime.fromtimestamp(float(value), tz=UTC)
+            except ValueError as exc:
+                raise LiveSessionError(f"Unsupported datetime value: {value!r}") from exc
+    raise LiveSessionError(f"Unsupported datetime value: {value!r}")
+
+
+def _normalize_metadata(value: Any) -> Mapping[str, str]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        raise LiveSessionError("Call metadata must be a mapping")
+    typed_mapping = cast(Mapping[str, object], value)
+    normalized = {str(key): str(val) for key, val in typed_mapping.items()}
+    return MappingProxyType(normalized)

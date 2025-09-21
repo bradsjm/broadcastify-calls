@@ -30,6 +30,7 @@ class TelemetrySink(Protocol):
 
         ...
 
+
 class NullTelemetrySink(TelemetrySink):
     """Telemetry sink that drops all events."""
 

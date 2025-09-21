@@ -53,13 +53,39 @@ class LiveProducerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     poll_interval: PositiveFloat = Field(
-        default=2.0, description="Polling interval in seconds between Broadcastify requests"
+        default=2.0,
+        description="Polling interval in seconds between Broadcastify requests",
     )
-    rate_limit_per_minute: NonNegativeInt = Field(
-        default=60, description="Maximum number of Broadcastify requests per minute"
+    jitter_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
+        description=("Fractional jitter applied to poll interval (e.g. 0.1 => +/-10% variance)"),
     )
-    initial_position: int | None = Field(
+    queue_maxsize: NonNegativeInt = Field(
+        default=256,
+        description="Maximum queued call events before back-pressure halts polling",
+    )
+    initial_backoff: PositiveFloat = Field(
+        default=1.0, description="Initial retry delay (seconds) after a failed poll"
+    )
+    max_backoff: PositiveFloat = Field(
+        default=30.0, description="Upper bound on exponential backoff (seconds)"
+    )
+    max_retry_attempts: NonNegativeInt | None = Field(
         default=None,
+        description="Optional cap on consecutive retry attempts before surfacing an error",
+    )
+    rate_limit_per_minute: NonNegativeInt | None = Field(
+        default=None,
+        description="Maximum number of Broadcastify requests per minute (None => unlimited)",
+    )
+    metrics_interval: PositiveFloat = Field(
+        default=60.0,
+        description="Frequency (seconds) for emitting producer health metrics",
+    )
+    initial_position: float | None = Field(
+        default=None,
+        ge=0.0,
         description="Optional cursor for the first poll when resuming a call feed",
     )
 
