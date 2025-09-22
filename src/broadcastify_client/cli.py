@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from .client import BroadcastifyClient
 from .config import Credentials, load_credentials_from_environment
@@ -30,10 +30,14 @@ LOG_LEVELS: Final[dict[str, int]] = {
 
 @dataclass(frozen=True, slots=True)
 class CliOptions:
-    """Parsed command-line options for the Broadcastify CLI."""
+    """Parsed command-line options for the Broadcastify CLI.
 
-    system_id: int
+    Exactly one of (playlist_id) or (system_id + talkgroup_ids) must be provided.
+    """
+
+    system_id: int | None
     talkgroup_ids: tuple[int, ...]
+    playlist_id: str | None
     initial_position: float | None
     dotenv_path: Path | None
     log_level: int
@@ -59,24 +63,35 @@ async def run_async(options: CliOptions) -> int:
     try:
         await client.authenticate(credentials)
         token_acquired = True
-        for talkgroup_id in options.talkgroup_ids:
-            await client.create_live_producer(
-                options.system_id,
-                talkgroup_id,
+        # Branch by subscription mode
+        if options.playlist_id is not None:
+            await client.create_playlist_producer(
+                options.playlist_id,
                 position=options.initial_position,
             )
-        printer = _create_event_printer(options.metadata_limit)
-        for talkgroup_id in options.talkgroup_ids:
-            topic = f"calls.live.{options.system_id}.{talkgroup_id}"
+            printer = _create_event_printer(options.metadata_limit)
+            topic = f"calls.live.playlist.{options.playlist_id}"
             await client.register_consumer(topic, printer)
-        if not options.talkgroup_ids:
-            await client.register_consumer("calls.live", printer)
-        await client.start()
-        logger.info(
-            "Streaming live calls for system %s talkgroup(s) %s",
-            options.system_id,
-            ",".join(str(tg) for tg in options.talkgroup_ids) if options.talkgroup_ids else "*",
-        )
+            await client.start()
+            logger.info("Streaming live calls for playlist %s", options.playlist_id)
+        else:
+            assert options.system_id is not None
+            for talkgroup_id in options.talkgroup_ids:
+                await client.create_live_producer(
+                    options.system_id,
+                    talkgroup_id,
+                    position=options.initial_position,
+                )
+            printer = _create_event_printer(options.metadata_limit)
+            for talkgroup_id in options.talkgroup_ids:
+                topic = f"calls.live.{options.system_id}.{talkgroup_id}"
+                await client.register_consumer(topic, printer)
+            await client.start()
+            logger.info(
+                "Streaming live calls for system %s talkgroup(s) %s",
+                options.system_id,
+                ",".join(str(tg) for tg in options.talkgroup_ids) if options.talkgroup_ids else "*",
+            )
         await _wait_for_shutdown_signal()
         logger.info("Shutdown signal received; stopping client")
     except AuthenticationError as exc:
@@ -114,16 +129,25 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     parser.add_argument(
         "--system-id",
         type=int,
-        required=True,
-        help="Broadcastify system identifier to monitor",
+        required=False,
+        default=None,
+        help="Broadcastify system identifier to monitor (mutually exclusive with --playlist-id)",
     )
     parser.add_argument(
         "--talkgroup-id",
         dest="talkgroup_ids",
         type=int,
         action="append",
-        required=True,
+        required=False,
+        default=None,
         help="Talkgroup identifier to subscribe to (repeat for multiple)",
+    )
+    parser.add_argument(
+        "--playlist-id",
+        dest="playlist_id",
+        type=str,
+        default=None,
+        help="Playlist GUID to monitor (mutually exclusive with --system-id/--talkgroup-id)",
     )
     parser.add_argument(
         "--initial-position",
@@ -151,13 +175,35 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     )
 
     namespace = parser.parse_args(argv)
-    talkgroup_ids = tuple(dict.fromkeys(namespace.talkgroup_ids))
+    # Normalise talkgroup list; argparse yields None if not provided.
+    raw_talkgroups = cast(list[int] | None, namespace.talkgroup_ids) or []
+    talkgroup_ids: tuple[int, ...] = tuple(dict.fromkeys(raw_talkgroups))
     if namespace.metadata_limit < 0:
         parser.error("--metadata-limit must be zero or positive")
 
+    # Validate mutually exclusive modes
+    playlist_id: str | None = namespace.playlist_id
+    has_playlist = playlist_id is not None
+    has_system = namespace.system_id is not None
+    has_talkgroups = len(talkgroup_ids) > 0
+
+    if has_playlist and (has_system or has_talkgroups):
+        parser.error("--playlist-id cannot be used with --system-id or --talkgroup-id")
+    if not has_playlist:
+        if not has_system or not has_talkgroups:
+            parser.error(
+                (
+                    "When not using --playlist-id, both --system-id and at least one "
+                    "--talkgroup-id are required"
+                ),
+            )
+
     return CliOptions(
-        system_id=namespace.system_id,
-        talkgroup_ids=talkgroup_ids,
+        system_id=namespace.system_id if not has_playlist else None,
+        talkgroup_ids=()
+        if has_playlist
+        else talkgroup_ids,
+        playlist_id=playlist_id,
         initial_position=namespace.initial_position,
         dotenv_path=namespace.dotenv,
         log_level=LOG_LEVELS[namespace.log_level],
