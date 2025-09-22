@@ -337,18 +337,31 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         return await self._archive_client.get_archived_calls(system_id, talkgroup_id, time_block)
 
     async def create_live_producer(
-        self, system_id: int, talkgroup_id: int, *, position: float | None = None
+        self,
+        system_id: int,
+        talkgroup_id: int,
+        *,
+        position: float | None = None,
+        initial_history: int | None = None,
     ) -> LiveSubscriptionHandle:
         """Create a talkgroup-based live producer and return a handle for managing it."""
         subscription = TalkgroupSubscription(system_id=system_id, talkgroup_id=talkgroup_id)
-        return await self._register_subscription(subscription, position=position)
+        return await self._register_subscription(
+            subscription, position=position, initial_history=initial_history
+        )
 
     async def create_playlist_producer(
-        self, playlist_id: PlaylistId, *, position: float | None = None
+        self,
+        playlist_id: PlaylistId,
+        *,
+        position: float | None = None,
+        initial_history: int | None = None,
     ) -> LiveSubscriptionHandle:
         """Create a playlist-driven live producer and return a handle for managing it."""
         subscription = PlaylistSubscription(playlist_id=playlist_id)
-        return await self._register_subscription(subscription, position=position)
+        return await self._register_subscription(
+            subscription, position=position, initial_history=initial_history
+        )
 
     async def register_consumer(self, topic: str, callback: ConsumerCallback) -> None:
         """Subscribe *callback* to receive events published on *topic*."""
@@ -457,11 +470,18 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         return await self._discovery_client.resolve_talkgroup(name, region)
 
     async def _register_subscription(
-        self, subscription: Subscription, *, position: float | None
+        self,
+        subscription: Subscription,
+        *,
+        position: float | None,
+        initial_history: int | None = None,
     ) -> LiveSubscriptionHandle:
         handle_id = uuid4().hex
         topic = self._topic_for_subscription(subscription)
-        config = LiveProducerConfig(initial_position=position)
+        config = LiveProducerConfig(
+            initial_position=position,
+            initial_history=None if initial_history is None else max(0, int(initial_history)),
+        )
         poller = self._call_poller_factory.create(
             subscription,
             http_client=self._http_client,

@@ -87,6 +87,14 @@ class LiveProducerConfig(BaseModel):
         ge=0.0,
         description="Optional cursor for the first poll when resuming a call feed",
     )
+    initial_history: NonNegativeInt | None = Field(
+        default=None,
+        description=(
+            "Optional cap on historical calls to dispatch on the first fetch. "
+            "None preserves all history (library default). 0 emits live-only (skip all), "
+            "and a positive value keeps only the last N calls from the first batch."
+        ),
+    )
 
 
 class CacheConfig(BaseModel):
@@ -146,6 +154,20 @@ class TranscriptionConfig(BaseModel):
     emit_partial_results: bool = Field(
         default=True,
         description="Whether to emit partial transcripts while audio is streaming",
+    )
+    min_batch_seconds: PositiveFloat = Field(
+        default=0.5,
+        description=(
+            "Minimum aggregated audio duration required (in seconds) before a batch is sent "
+            "to the transcription provider. Chunks shorter than this are skipped."
+        ),
+    )
+    min_batch_bytes: NonNegativeInt = Field(
+        default=4096,
+        description=(
+            "Minimum total payload size (in bytes) required before a batch is sent to the "
+            "transcription provider. Batches below this threshold are skipped."
+        ),
     )
 
     @classmethod

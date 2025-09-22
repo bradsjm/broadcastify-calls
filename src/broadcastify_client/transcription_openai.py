@@ -106,16 +106,31 @@ class OpenAIWhisperBackend:
                 data = buffer.getvalue()
                 buffer = io.BytesIO()  # reset
                 has_buffer = False
-                text = await flush_batch(data)
-                yield TranscriptionPartial(
-                    call_id=chunk.call_id,
-                    chunk_index=chunk_index,
-                    start_time=start_time,
-                    end_time=end_time,
-                    text=text,
-                    confidence=None,
-                )
-                chunk_index += 1
+                duration = end_time - start_time
+                if duration < float(self._config.min_batch_seconds) or len(data) < int(
+                    self._config.min_batch_bytes
+                ):
+                    logger.debug(
+                        "Skipping transcription batch: duration=%.3fs bytes=%d below thresholds",
+                        duration,
+                        len(data),
+                    )
+                else:
+                    try:
+                        text = await flush_batch(data)
+                    except TranscriptionError as exc:
+                        logger.warning("Transcription batch failed (non-fatal): %s", exc)
+                        text = ""
+                    if text:
+                        yield TranscriptionPartial(
+                            call_id=chunk.call_id,
+                            chunk_index=chunk_index,
+                            start_time=start_time,
+                            end_time=end_time,
+                            text=text,
+                            confidence=None,
+                        )
+                        chunk_index += 1
 
     async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
         """Return a single transcription result for the entire audio stream."""
@@ -125,9 +140,31 @@ class OpenAIWhisperBackend:
             call_id = chunk.call_id
             buffer.write(chunk.payload)
         if call_id is None:
-            raise TranscriptionError("No audio received for final transcription")
+            # With no audio events, preserve API semantics by returning an empty result.
+            return TranscriptionResult(
+                call_id="",
+                text="",
+                language=self._config.language or "",
+                average_logprob=None,
+                segments=(),
+            )
 
-        text = await self._transcribe_bytes(buffer.getvalue())
+        data = buffer.getvalue()
+        min_seconds = float(self._config.min_batch_seconds)
+        min_bytes = int(self._config.min_batch_bytes)
+        if min_seconds > 0.0 and len(data) < min_bytes:
+            logger.debug(
+                "Skipping final transcription: bytes=%d below threshold=%d",
+                len(data),
+                min_bytes,
+            )
+            text = ""
+        else:
+            try:
+                text = await self._transcribe_bytes(data)
+            except TranscriptionError as exc:
+                logger.warning("Final transcription failed (non-fatal): %s", exc)
+                text = ""
         # For now, no segment-level partials are returned from finalize.
         return TranscriptionResult(
             call_id=call_id,
@@ -150,5 +187,6 @@ class OpenAIWhisperBackend:
         response_obj: object = response
         text: str | None = getattr(response_obj, "text", None)
         if not text:
-            raise TranscriptionError("Empty transcription response")
+            logger.warning("Empty transcription response from provider; treating as empty text")
+            return ""
         return text

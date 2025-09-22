@@ -52,6 +52,7 @@ class CliOptions:
     talkgroup_ids: tuple[int, ...]
     playlist_id: str | None
     initial_position: float | None
+    history: int
     dotenv_path: Path | None
     log_level: int
     metadata_limit: int
@@ -170,6 +171,14 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         help="Initial cursor position (seconds) to resume from",
     )
     parser.add_argument(
+        "--history",
+        type=int,
+        default=0,
+        help=(
+            "Number of historical calls to emit on first fetch (0 = live only)."
+        ),
+    )
+    parser.add_argument(
         "--dotenv",
         type=Path,
         default=None,
@@ -202,6 +211,8 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     talkgroup_ids: tuple[int, ...] = tuple(dict.fromkeys(raw_talkgroups))
     if namespace.metadata_limit < 0:
         parser.error("--metadata-limit must be zero or positive")
+    if namespace.history < 0:
+        parser.error("--history must be zero or positive")
 
     # Validate mutually exclusive modes
     playlist_id: str | None = namespace.playlist_id
@@ -225,6 +236,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         talkgroup_ids=() if has_playlist else talkgroup_ids,
         playlist_id=playlist_id,
         initial_position=namespace.initial_position,
+        history=int(namespace.history),
         dotenv_path=namespace.dotenv,
         log_level=LOG_LEVELS[namespace.log_level],
         metadata_limit=namespace.metadata_limit,
@@ -316,6 +328,7 @@ async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> N
         await client.create_playlist_producer(
             options.playlist_id,
             position=options.initial_position,
+            initial_history=options.history,
         )
         return
     assert options.system_id is not None
@@ -324,6 +337,7 @@ async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> N
             options.system_id,
             talkgroup_id,
             position=options.initial_position,
+            initial_history=options.history,
         )
 
 

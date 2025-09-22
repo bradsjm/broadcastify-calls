@@ -53,6 +53,10 @@ class LiveCallProducer:
         maxsize = 0 if config.queue_maxsize == 0 else int(config.queue_maxsize)
         self._queue = queue or asyncio.Queue(maxsize=maxsize)
         self._cursor = config.initial_position
+        self._initial_history = (
+            -1 if config.initial_history is None else int(config.initial_history)
+        )
+        self._history_applied = False
         self._stopped = asyncio.Event()
         self._rate_limiter = (
             _RateLimiter(config.rate_limit_per_minute)
@@ -134,6 +138,7 @@ class LiveCallProducer:
 
             dispatched = 0
             async with asyncio.TaskGroup() as task_group:
+                events = self._filter_initial_history(events)
                 for event in events:
                     dispatched += 1
                     task_group.create_task(self._queue.put(event))
@@ -166,6 +171,39 @@ class LiveCallProducer:
                 await asyncio.sleep(
                     _jittered_interval(self._config.poll_interval, self._config.jitter_ratio)
                 )
+
+    def _filter_initial_history(
+        self, events: Iterable[LiveCallEnvelope]
+    ) -> list[LiveCallEnvelope]:
+        """Apply the initial history limit to the first batch of events only.
+
+        If ``initial_history`` is 0, we keep only the most recent event(s) in the
+        first batch (based on the largest cursor/received_at) and drop older ones.
+        For ``initial_history`` > 0, we keep the last N events in the batch.
+
+        Subsequent batches are returned unchanged.
+        """
+        seq = list(events)
+        if self._history_applied:
+            return seq
+        self._history_applied = True
+        if not seq:
+            return seq
+
+        def _event_key(ev: LiveCallEnvelope) -> float:
+            # Use the original call timestamp to determine recency; backend cursors may be
+            # normalised and identical across a batch and are thus not reliable here.
+            return ev.call.received_at.timestamp()
+
+        if self._initial_history == 0:
+            # Live-only: drop the initial history batch entirely.
+            return []
+        if self._initial_history < 0:
+            return seq
+
+        # Keep the last N events by key order (oldest→newest).
+        seq.sort(key=_event_key)
+        return seq[-self._initial_history :]
 
     async def stop(self) -> None:
         """Request termination of the producer loop."""
