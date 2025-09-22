@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class TranscriptionBackend(Protocol):
     """Protocol implemented by transcription service integrations."""
 
-    async def stream_transcription(
+    def stream_transcription(
         self, audio_stream: AsyncIterator[AudioChunkEvent]
     ) -> AsyncIterator[TranscriptionPartial]:  # pragma: no cover - protocol
         """Yield partial transcriptions for the provided audio stream."""
@@ -48,7 +48,7 @@ class TranscriptionPipeline:
         """Yield transcription partials for *audio_stream*."""
         try:
             logger.debug("Starting streaming transcription")
-            partial_stream = await self._backend.stream_transcription(audio_stream)
+            partial_stream = self._backend.stream_transcription(audio_stream)
             async for partial in partial_stream:
                 yield partial
         except TranscriptionError:

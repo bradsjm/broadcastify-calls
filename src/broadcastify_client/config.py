@@ -100,7 +100,12 @@ class CacheConfig(BaseModel):
 
 
 class TranscriptionConfig(BaseModel):
-    """Settings for the optional transcription pipeline."""
+    """Settings for the optional speech-to-text (STT) pipeline.
+
+    The default provider targets an OpenAI-compatible Whisper endpoint. Configure the
+    ``endpoint`` and ``api_key`` to point at a compatible server (e.g. OpenAI, local
+    Whisper service implementing the OpenAI API surface).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -109,8 +114,57 @@ class TranscriptionConfig(BaseModel):
     )
     enabled: bool = Field(default=False, description="Whether transcription is enabled")
     endpoint: HttpUrl | None = Field(
-        default=None, description="Override URL for the transcription endpoint"
+        default=None, description="Base URL for an OpenAI-compatible API"
     )
+    api_key: str | None = Field(
+        default=None,
+        description=(
+            "API key for the transcription provider. If omitted, the environment "
+            "variable OPENAI_API_KEY is used when provider is 'openai'."
+        ),
+    )
+    model: str = Field(
+        default="whisper-1",
+        description="Model identifier to use for speech-to-text (e.g. 'whisper-1')",
+    )
+    language: str | None = Field(
+        default="en",
+        description="Optional BCP-47 language hint to pass to the provider",
+    )
+    chunk_seconds: int = Field(
+        default=10,
+        ge=1,
+        description="Approximate seconds of audio to batch per partial transcription",
+    )
+    max_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum concurrent transcription requests to the provider",
+    )
+    emit_partial_results: bool = Field(
+        default=True,
+        description="Whether to emit partial transcripts while audio is streaming",
+    )
+
+    @classmethod
+    def from_environment(cls) -> TranscriptionConfig:
+        """Build a configuration from environment variables with safe defaults.
+
+        Recognised variables:
+            - ``OPENAI_BASE_URL`` → ``endpoint`` when provider is ``openai``
+            - ``OPENAI_API_KEY`` → ``api_key`` when provider is ``openai``
+            - ``OPENAI_WHISPER_MODEL`` → ``model`` (defaults to ``whisper-1``)
+        """
+        endpoint = os.environ.get("OPENAI_BASE_URL")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        model = os.environ.get("OPENAI_WHISPER_MODEL", "whisper-1")
+        return cls(
+            provider="openai",
+            enabled=False,
+            endpoint=HttpUrl(endpoint) if endpoint else None,
+            api_key=api_key,
+            model=model,
+        )
 
 
 def load_credentials_from_environment(

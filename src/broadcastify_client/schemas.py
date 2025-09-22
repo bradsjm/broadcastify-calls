@@ -1,4 +1,3 @@
-
 """Pydantic schemas for Broadcastify HTTP interactions."""
 
 from __future__ import annotations

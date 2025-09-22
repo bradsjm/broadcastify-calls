@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -15,7 +15,7 @@ from uuid import uuid4
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
-from .config import Credentials, HttpClientConfig, LiveProducerConfig
+from .config import Credentials, HttpClientConfig, LiveProducerConfig, TranscriptionConfig
 from .errors import AudioDownloadError, LiveSessionError
 from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
@@ -25,6 +25,7 @@ from .models import (
     ArchiveResult,
     AudioChunkEvent,
     Call,
+    CallId,
     LiveCallEnvelope,
     PlaylistDescriptor,
     PlaylistId,
@@ -45,6 +46,8 @@ from .telemetry import (
     PollMetrics,
     TelemetrySink,
 )
+from .transcription import TranscriptionPipeline
+from .transcription_openai import OpenAIWhisperBackend
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +280,7 @@ class BroadcastifyClientDependencies:
     telemetry: TelemetrySink | None = None
     call_poller_factory: CallPollerFactory | None = None
     audio_consumer_factory: Callable[[], AudioConsumer] | None = None
+    transcription_config: TranscriptionConfig | None = None
     playlist_catalog: PlaylistCatalog | None = None
     discovery_client: DiscoveryService | None = None
 
@@ -305,11 +309,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._audio_consumer_factory = deps.audio_consumer_factory
         self._playlist_catalog = deps.playlist_catalog
         self._discovery_client = deps.discovery_client
+        self._transcription_config = deps.transcription_config or TranscriptionConfig()
+        self._transcription_pipeline: TranscriptionPipeline | None = None
         self._producer_handles: dict[str, ProducerHandle] = {}
         self._handles_lock = asyncio.Lock()
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
+        self._transcript_partial_topic = "transcription.partial"
+        self._transcript_final_topic = "transcription.complete"
+        self._transcription_buffers: dict[CallId, list[AudioChunkEvent]] = {}
         logger.debug("BroadcastifyClient initialised")
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
@@ -374,6 +383,15 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         async with self._handles_lock:
             if self._started:
                 return
+            # Lazily initialise transcription pipeline if enabled
+            if self._transcription_config.enabled and self._transcription_pipeline is None:
+                if self._transcription_config.provider == "openai":
+                    backend = OpenAIWhisperBackend(self._transcription_config)
+                else:
+                    raise NotImplementedError("Only 'openai' transcription provider is implemented")
+                self._transcription_pipeline = TranscriptionPipeline(
+                    backend, telemetry=self._telemetry
+                )
             for handle in self._producer_handles.values():
                 if handle.task is None:
                     self._start_producer(handle)
@@ -431,9 +449,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             raise NotImplementedError("Discovery integration not configured")
         return await self._discovery_client.search_talkgroups(query, limit=limit)
 
-    async def resolve_talkgroup(
-        self, name: str, region: str
-    ) -> TalkgroupSummary | None:
+    async def resolve_talkgroup(self, name: str, region: str) -> TalkgroupSummary | None:
         """Resolve a talkgroup by *name* and *region*, or ``None`` when no match exists."""
         if self._discovery_client is None:
             raise NotImplementedError("Discovery integration not configured")
@@ -450,9 +466,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             http_client=self._http_client,
             telemetry=self._telemetry,
         )
-        queue: asyncio.Queue[LiveCallEnvelope] = asyncio.Queue(
-            maxsize=config.queue_maxsize or 0
-        )
+        queue: asyncio.Queue[LiveCallEnvelope] = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         producer = LiveCallProducer(
             poller,
             config,
@@ -544,9 +558,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         except asyncio.CancelledError:
             return
 
-    async def _consume_audio(
-        self, handle: ProducerHandle, event: LiveCallEnvelope
-    ) -> None:
+    async def _consume_audio(self, handle: ProducerHandle, event: LiveCallEnvelope) -> None:
         assert handle.audio_consumer is not None
         assert handle.audio_queue is not None
         try:
@@ -594,6 +606,52 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 try:
                     await self._event_bus.publish(self._audio_topic, chunk)
                     await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
+                    # Fan-out to transcription pipeline when enabled
+                    if (
+                        self._transcription_pipeline is not None
+                        and self._transcription_config.emit_partial_results
+                    ):
+
+                        async def _yield_one(c: AudioChunkEvent) -> AsyncIterator[AudioChunkEvent]:
+                            yield c
+
+                        async for partial in self._transcription_pipeline.transcribe_stream(
+                            _yield_one(chunk)
+                        ):
+                            await self._event_bus.publish(self._transcript_partial_topic, partial)
+
+                    # Buffer chunks and publish final transcript when finished
+                    if self._transcription_pipeline is not None:
+                        buf = self._transcription_buffers.setdefault(chunk.call_id, [])
+                        buf.append(chunk)
+                        if chunk.finished:
+                            call_id: CallId = chunk.call_id
+
+                            pipeline = self._transcription_pipeline
+                            assert pipeline is not None
+
+                            async def _finalize(call: CallId, p: TranscriptionPipeline) -> None:
+                                chunks = self._transcription_buffers.pop(call, [])
+
+                                async def _iter() -> AsyncIterator[AudioChunkEvent]:
+                                    for item in chunks:
+                                        yield item
+
+                                try:
+                                    result = await p.transcribe_final(_iter())
+                                    await self._event_bus.publish(
+                                        self._transcript_final_topic, result
+                                    )
+                                except Exception:
+                                    logger.exception("Final transcription failed for call %s", call)
+
+                            finalize_task = asyncio.create_task(_finalize(call_id, pipeline))
+
+                            def _remove(task: asyncio.Task[None]) -> None:
+                                handle.audio_tasks.discard(task)
+
+                            handle.audio_tasks.add(finalize_task)
+                            finalize_task.add_done_callback(_remove)
                 except Exception as exc:
                     logger.exception("Failed to dispatch audio chunk for call %s", chunk.call_id)
                     self._telemetry.record_event(

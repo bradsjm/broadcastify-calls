@@ -109,9 +109,7 @@ class JsonArchiveParser(ArchiveParser):
             raw=typed_payload,
         )
 
-    def _to_envelope(
-        self, entry: ArchiveCallEntry, retrieved_at: datetime
-    ) -> ArchiveCallEnvelope:
+    def _to_envelope(self, entry: ArchiveCallEntry, retrieved_at: datetime) -> ArchiveCallEnvelope:
         metadata = parse_call_metadata(entry.metadata)
         call = Call(
             call_id=entry.id,

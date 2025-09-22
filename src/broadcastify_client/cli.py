@@ -200,9 +200,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
 
     return CliOptions(
         system_id=namespace.system_id if not has_playlist else None,
-        talkgroup_ids=()
-        if has_playlist
-        else talkgroup_ids,
+        talkgroup_ids=() if has_playlist else talkgroup_ids,
         playlist_id=playlist_id,
         initial_position=namespace.initial_position,
         dotenv_path=namespace.dotenv,
@@ -227,6 +225,7 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
         system_text,
         group_text,
         source_text,
+        f"call {call.call_id}",
         f"duration {duration_text}",
         f"freq {frequency}",
         f"cursor {cursor}",
@@ -235,6 +234,11 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
         components.append(f"expires {expires_at}")
     header = " | ".join(components)
     detail_lines: list[str] = []
+    # Additional human-friendly talkgroup detail expected by tests
+    if call.talkgroup_description:
+        detail_lines.append(
+            f"  talkgroup {call.talkgroup_id} ({call.talkgroup_description})"
+        )
     if call.talkgroup_description:
         detail_lines.append(f"  description: {call.talkgroup_description}")
     metadata_text = _format_metadata(call.metadata, metadata_limit)

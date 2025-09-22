@@ -1,0 +1,154 @@
+"""OpenAI-compatible Whisper transcription backend.
+
+This backend targets the OpenAI transcription API surface and compatible providers
+exposing the same interface. It implements the TranscriptionBackend protocol and
+converts ``AudioChunkEvent`` streams into Whisper requests using multipart form data.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import io
+import logging
+from collections.abc import AsyncIterator
+from typing import Protocol, cast, runtime_checkable
+
+from .config import TranscriptionConfig
+from .errors import TranscriptionError
+from .models import AudioChunkEvent, TranscriptionPartial, TranscriptionResult
+
+logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _TranscriptionsAPI(Protocol):
+    async def create(
+        self,
+        *,
+        model: str,
+        file: tuple[str, io.BytesIO, str],
+        language: str | None,
+    ) -> object:  # pragma: no cover - protocol
+        ...
+
+
+@runtime_checkable
+class _AudioAPI(Protocol):
+    @property
+    def transcriptions(self) -> _TranscriptionsAPI:  # pragma: no cover - protocol
+        ...
+
+
+@runtime_checkable
+class OpenAIClientLike(Protocol):
+    """Minimal protocol for the OpenAI async client used by this backend."""
+
+    @property
+    def audio(self) -> _AudioAPI:  # pragma: no cover - protocol
+        """Return the audio API namespace exposing transcriptions.create()."""
+        ...
+
+
+class OpenAIWhisperBackend:
+    """Transcription backend using an OpenAI-compatible Whisper endpoint."""
+
+    def __init__(self, config: TranscriptionConfig) -> None:
+        """Initialise backend from a validated TranscriptionConfig."""
+        if not config.api_key:
+            raise TranscriptionError("Transcription API key not configured")
+        self._config = config
+        client_kwargs: dict[str, str] = {"api_key": config.api_key}
+        if config.endpoint is not None:
+            client_kwargs["base_url"] = str(config.endpoint)
+        # Dynamically import the OpenAI client to avoid hard import dependency.
+        try:
+            module = importlib.import_module("openai")
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency missing
+            raise TranscriptionError(
+                "openai package not installed. Install with the 'transcription' extra."
+            ) from exc
+
+        AsyncOpenAIClass = getattr(module, "AsyncOpenAI", None)
+        if AsyncOpenAIClass is None:  # pragma: no cover - unexpected API surface
+            raise TranscriptionError("openai.AsyncOpenAI not found in installed package")
+
+        # Instantiate the provider client and narrow the type to our protocol.
+        self._client = cast(OpenAIClientLike, AsyncOpenAIClass(**client_kwargs))
+        if not isinstance(self._client, OpenAIClientLike):  # type: ignore[arg-type]
+            # Best-effort guard; in practice AsyncOpenAI conforms.
+            raise TranscriptionError("OpenAI client does not expose expected API surface")
+
+    async def stream_transcription(
+        self, audio_stream: AsyncIterator[AudioChunkEvent]
+    ) -> AsyncIterator[TranscriptionPartial]:
+        """Yield partial transcriptions for the audio stream."""
+        buffer = io.BytesIO()
+        has_buffer = False
+        start_time: float = 0.0
+        end_time: float = 0.0
+        chunk_index = 0
+        semaphore = asyncio.Semaphore(self._config.max_concurrency)
+
+        async def flush_batch(data: bytes) -> str:
+            async with semaphore:
+                return await self._transcribe_bytes(data)
+
+        async for chunk in audio_stream:
+            if not has_buffer:
+                start_time = chunk.start_offset
+                has_buffer = True
+            end_time = chunk.end_offset
+            buffer.write(chunk.payload)
+            duration = end_time - start_time
+            should_flush = duration >= float(self._config.chunk_seconds) or chunk.finished
+            if should_flush:
+                data = buffer.getvalue()
+                buffer = io.BytesIO()  # reset
+                has_buffer = False
+                text = await flush_batch(data)
+                yield TranscriptionPartial(
+                    call_id=chunk.call_id,
+                    chunk_index=chunk_index,
+                    start_time=start_time,
+                    end_time=end_time,
+                    text=text,
+                    confidence=None,
+                )
+                chunk_index += 1
+
+    async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
+        """Return a single transcription result for the entire audio stream."""
+        buffer = io.BytesIO()
+        call_id: str | None = None
+        async for chunk in audio_stream:
+            call_id = chunk.call_id
+            buffer.write(chunk.payload)
+        if call_id is None:
+            raise TranscriptionError("No audio received for final transcription")
+
+        text = await self._transcribe_bytes(buffer.getvalue())
+        # For now, no segment-level partials are returned from finalize.
+        return TranscriptionResult(
+            call_id=call_id,
+            text=text,
+            language=self._config.language or "",
+            average_logprob=None,
+            segments=(),
+        )
+
+    async def _transcribe_bytes(self, data: bytes) -> str:
+        """Call the provider transcription endpoint with the given bytes and return text."""
+        # Use the OpenAI audio transcriptions endpoint via the files API.
+        # The official SDK exposes it via ``audio.transcriptions.create``.
+        response = await self._client.audio.transcriptions.create(  # type: ignore[reportUnknownMemberType]
+            model=self._config.model,
+            file=("audio.mp3", io.BytesIO(data), "audio/mpeg"),
+            language=self._config.language,
+        )
+
+        response_obj: object = response
+        text: str | None = getattr(response_obj, "text", None)
+        if not text:
+            raise TranscriptionError("Empty transcription response")
+        return text
