@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
+from .audio_downloader_http import HttpAudioDownloader
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import Credentials, HttpClientConfig, LiveProducerConfig, TranscriptionConfig
 from .errors import AudioDownloadError, LiveSessionError
@@ -477,6 +478,11 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
         audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
         if audio_consumer is not None:
+            audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
+        elif self._transcription_config.enabled:
+            # Default to HTTP downloader when transcription is enabled and no override provided
+            downloader = HttpAudioDownloader(self._http_client, self._authenticator)
+            audio_consumer = AudioConsumer(downloader, telemetry=self._telemetry)
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         handle = ProducerHandle(
             id=handle_id,

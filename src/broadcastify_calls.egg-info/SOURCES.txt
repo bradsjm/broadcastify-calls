@@ -9,6 +9,7 @@ src/broadcastify_calls.egg-info/top_level.txt
 src/broadcastify_client/__init__.py
 src/broadcastify_client/archives.py
 src/broadcastify_client/audio_consumer.py
+src/broadcastify_client/audio_downloader_http.py
 src/broadcastify_client/auth.py
 src/broadcastify_client/cache.py
 src/broadcastify_client/cli.py
@@ -24,4 +25,5 @@ src/broadcastify_client/py.typed
 src/broadcastify_client/schemas.py
 src/broadcastify_client/telemetry.py
 src/broadcastify_client/transcription.py
+src/broadcastify_client/transcription_openai.py
 tests/test_client.py

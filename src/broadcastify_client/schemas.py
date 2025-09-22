@@ -77,6 +77,19 @@ class LiveCallEntry(BaseModel):
         alias="pos",
         description="Cursor position emitted by the backend when present.",
     )
+    # Fields required to construct the audio URL for the call playback
+    filename: str | None = Field(
+        default=None,
+        description="Audio asset filename without extension (when provided by backend).",
+    )
+    enc: str | None = Field(
+        default=None,
+        description="Audio encoding/extension for the asset (e.g., 'mp3').",
+    )
+    hash: str | None = Field(
+        default=None,
+        description="Optional hash bucket used in audio URL path when present.",
+    )
 
 
 class LiveCallsResponse(BaseModel):

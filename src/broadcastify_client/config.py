@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from datetime import timedelta
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, NonNegativeInt, PositiveFloat
@@ -125,7 +124,10 @@ class TranscriptionConfig(BaseModel):
     )
     model: str = Field(
         default="whisper-1",
-        description="Model identifier to use for speech-to-text (e.g. 'whisper-1')",
+        description=(
+            "Model identifier to use for speech-to-text (e.g. 'whisper-1') "
+            "variable OPENAI_WHISPER_MODEL is used as a default."
+        ),
     )
     language: str | None = Field(
         default="en",
@@ -147,7 +149,7 @@ class TranscriptionConfig(BaseModel):
     )
 
     @classmethod
-    def from_environment(cls) -> TranscriptionConfig:
+    def from_environment(cls, *, env: Mapping[str, str] | None = None) -> TranscriptionConfig:
         """Build a configuration from environment variables with safe defaults.
 
         Recognised variables:
@@ -155,9 +157,10 @@ class TranscriptionConfig(BaseModel):
             - ``OPENAI_API_KEY`` → ``api_key`` when provider is ``openai``
             - ``OPENAI_WHISPER_MODEL`` → ``model`` (defaults to ``whisper-1``)
         """
-        endpoint = os.environ.get("OPENAI_BASE_URL")
-        api_key = os.environ.get("OPENAI_API_KEY")
-        model = os.environ.get("OPENAI_WHISPER_MODEL", "whisper-1")
+        source = dict(os.environ if env is None else env)
+        endpoint = source.get("OPENAI_BASE_URL")
+        api_key = source.get("OPENAI_API_KEY")
+        model = source.get("OPENAI_WHISPER_MODEL", "whisper-1")
         return cls(
             provider="openai",
             enabled=False,
@@ -167,28 +170,18 @@ class TranscriptionConfig(BaseModel):
         )
 
 
-def load_credentials_from_environment(
-    *,
-    env: Mapping[str, str] | None = None,
-    dotenv_path: str | Path | None = None,
-) -> Credentials:
-    """Load Broadcastify credentials from environment variables or a .env file.
+def load_credentials_from_environment(*, env: Mapping[str, str] | None = None) -> Credentials:
+    """Load Broadcastify credentials from environment variables.
 
-    Environment keys ``LOGIN`` and ``PASSWORD`` are used. When the keys are missing
-    from *env* the function attempts to read them from *dotenv_path* (default
-    ``.env`` in the current working directory). Values parsed from the dotenv file
-    are merged with any existing environment entries, preferring explicit values
-    from *env*.
+    Requires environment keys ``LOGIN`` and ``PASSWORD`` to be set. The CLI loads
+    ``.env`` via python-dotenv prior to calling this function, so no file parsing
+    occurs here.
 
     Raises:
         ValueError: If the required keys cannot be resolved.
 
     """
-    resolved_env = dict(env or os.environ)
-    if "LOGIN" not in resolved_env or "PASSWORD" not in resolved_env:
-        path = Path(dotenv_path) if dotenv_path is not None else Path.cwd() / ".env"
-        if path.is_file():
-            resolved_env = {**_parse_dotenv(path), **resolved_env}
+    resolved_env = dict(os.environ if env is None else env)
 
     username = resolved_env.get("LOGIN")
     password = resolved_env.get("PASSWORD")
@@ -196,20 +189,3 @@ def load_credentials_from_environment(
         missing = [key for key in ("LOGIN", "PASSWORD") if key not in resolved_env]
         raise ValueError(f"Missing credential keys: {', '.join(missing)}")
     return Credentials(username=username, password=password)
-
-
-def _parse_dotenv(path: Path) -> dict[str, str]:
-    """Parse *path* as a dotenv file and return key/value pairs."""
-    variables: dict[str, str] = {}
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            variables[key] = value
-    return variables

@@ -20,6 +20,7 @@ Requires-Dist: aiolimiter>=1.1.0
 Requires-Dist: anyio>=4.4.0
 Requires-Dist: httpx[http2]>=0.27.0
 Requires-Dist: pydantic>=2.7.0
+Requires-Dist: python-dotenv>=1.1.1
 Provides-Extra: telemetry
 Requires-Dist: opentelemetry-instrumentation-httpx>=0.47b0; extra == "telemetry"
 Requires-Dist: opentelemetry-sdk>=1.28.0; extra == "telemetry"

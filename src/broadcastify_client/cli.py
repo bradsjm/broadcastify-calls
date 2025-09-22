@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from collections.abc import Sequence
@@ -13,11 +14,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, cast
 
-from .client import BroadcastifyClient
-from .config import Credentials, load_credentials_from_environment
+from dotenv import find_dotenv, load_dotenv
+
+from .client import BroadcastifyClient, BroadcastifyClientDependencies
+from .config import (
+    Credentials,
+    TranscriptionConfig,
+    load_credentials_from_environment,
+)
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
-from .models import CallMetadata, LiveCallEnvelope, SourceDescriptor
+from .models import (
+    CallMetadata,
+    LiveCallEnvelope,
+    SourceDescriptor,
+    TranscriptionPartial,
+    TranscriptionResult,
+)
 
 LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
@@ -42,6 +55,7 @@ class CliOptions:
     dotenv_path: Path | None
     log_level: int
     metadata_limit: int
+    transcription: bool
 
 
 async def run_async(options: CliOptions) -> int:
@@ -52,46 +66,46 @@ async def run_async(options: CliOptions) -> int:
     )
     logger = logging.getLogger("broadcastify_client.cli")
 
+    # Load .env early so subsequent resolution sees overrides. Use override=True to
+    # ensure .env values take precedence over existing environment variables.
+    dotenv_file = (
+        str(options.dotenv_path)
+        if options.dotenv_path is not None
+        else find_dotenv(usecwd=True)
+    )
+    if dotenv_file:
+        load_dotenv(dotenv_file, override=True)
+        logger.info("Loaded environment from %s (override=True)", dotenv_file)
+    else:
+        logger.debug("No .env file found; relying on process environment only")
+
     try:
         credentials = _resolve_credentials(options)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    client = BroadcastifyClient()
+    # Emit minimal diagnostics about effective env (avoid secrets)
+    openai_key_present = "OPENAI_API_KEY" in os.environ and bool(os.environ.get("OPENAI_API_KEY"))
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    logger.debug(
+        "Env resolution: LOGIN=%s, PASSWORD=%s, OPENAI_API_KEY=%s, OPENAI_BASE_URL=%s",
+        "set" if os.environ.get("LOGIN") else "unset",
+        "set" if os.environ.get("PASSWORD") else "unset",
+        "set" if openai_key_present else "unset",
+        openai_base_url or "unset",
+    )
+
+    transcription_cfg = _resolve_transcription_config(options.transcription, logger)
+    client = _build_client(transcription_cfg)
     token_acquired = False
     try:
         await client.authenticate(credentials)
         token_acquired = True
-        # Branch by subscription mode
-        if options.playlist_id is not None:
-            await client.create_playlist_producer(
-                options.playlist_id,
-                position=options.initial_position,
-            )
-            printer = _create_event_printer(options.metadata_limit)
-            topic = f"calls.live.playlist.{options.playlist_id}"
-            await client.register_consumer(topic, printer)
-            await client.start()
-            logger.info("Streaming live calls for playlist %s", options.playlist_id)
-        else:
-            assert options.system_id is not None
-            for talkgroup_id in options.talkgroup_ids:
-                await client.create_live_producer(
-                    options.system_id,
-                    talkgroup_id,
-                    position=options.initial_position,
-                )
-            printer = _create_event_printer(options.metadata_limit)
-            for talkgroup_id in options.talkgroup_ids:
-                topic = f"calls.live.{options.system_id}.{talkgroup_id}"
-                await client.register_consumer(topic, printer)
-            await client.start()
-            logger.info(
-                "Streaming live calls for system %s talkgroup(s) %s",
-                options.system_id,
-                ",".join(str(tg) for tg in options.talkgroup_ids) if options.talkgroup_ids else "*",
-            )
+        await _setup_producers(client, options)
+        await _register_live_consumers(client, options, options.metadata_limit, transcription_cfg)
+        await client.start()
+        logger.info(_streaming_banner(options))
         await _wait_for_shutdown_signal()
         logger.info("Shutdown signal received; stopping client")
     except AuthenticationError as exc:
@@ -173,6 +187,14 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         default=3,
         help="Maximum number of metadata key/value pairs to display per event",
     )
+    parser.add_argument(
+        "--transcription",
+        action="store_true",
+        help=(
+            "Enable speech-to-text transcription (requires OPENAI_API_KEY; "
+            "respects OPENAI_BASE_URL)"
+        ),
+    )
 
     namespace = parser.parse_args(argv)
     # Normalise talkgroup list; argparse yields None if not provided.
@@ -206,6 +228,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         dotenv_path=namespace.dotenv,
         log_level=LOG_LEVELS[namespace.log_level],
         metadata_limit=namespace.metadata_limit,
+        transcription=bool(getattr(namespace, "transcription", False)),
     )
 
 
@@ -259,6 +282,60 @@ def main(argv: Sequence[str] | None = None) -> None:
     raise SystemExit(exit_code)
 
 
+def _resolve_transcription_config(
+    requested: bool, logger: logging.Logger, *, dotenv_path: Path | None = None
+) -> TranscriptionConfig:
+    """Return a transcription config based on environment and user request.
+
+    The config is enabled only when the ``--transcription`` flag is set and an
+    ``OPENAI_API_KEY`` is available in the environment (directly or via .env).
+    """
+    cfg = TranscriptionConfig.from_environment()
+    if not requested:
+        return cfg
+    if cfg.api_key:
+        logger.info("Transcription enabled (provider=openai, model=%s)", cfg.model)
+        return cfg.model_copy(update={"enabled": True})
+    logger.warning(
+        "--transcription requested but OPENAI_API_KEY not set; transcription disabled",
+    )
+    return cfg
+
+
+def _build_client(cfg: TranscriptionConfig) -> BroadcastifyClient:
+    """Construct a BroadcastifyClient, enabling transcription when configured."""
+    if cfg.enabled:
+        deps = BroadcastifyClientDependencies(transcription_config=cfg)
+        return BroadcastifyClient(dependencies=deps)
+    return BroadcastifyClient()
+
+
+async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> None:
+    """Create live producers based on CLI options."""
+    if options.playlist_id is not None:
+        await client.create_playlist_producer(
+            options.playlist_id,
+            position=options.initial_position,
+        )
+        return
+    assert options.system_id is not None
+    for talkgroup_id in options.talkgroup_ids:
+        await client.create_live_producer(
+            options.system_id,
+            talkgroup_id,
+            position=options.initial_position,
+        )
+
+
+def _streaming_banner(options: CliOptions) -> str:
+    """Return a user-facing banner describing the current subscription."""
+    if options.playlist_id is not None:
+        return f"Streaming live calls for playlist {options.playlist_id}"
+    assert options.system_id is not None
+    tg_list = ",".join(str(tg) for tg in options.talkgroup_ids) if options.talkgroup_ids else "*"
+    return f"Streaming live calls for system {options.system_id} talkgroup(s) {tg_list}"
+
+
 def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     """Return a coroutine callback that prints call events with limited metadata."""
     print_lock = asyncio.Lock()
@@ -267,6 +344,41 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
         if not isinstance(event, LiveCallEnvelope):
             return
         line = format_call_event(event, metadata_limit=metadata_limit)
+        async with print_lock:
+            print(line, flush=True)
+
+    return _printer
+
+
+def _create_transcript_partial_printer() -> ConsumerCallback:
+    """Return a coroutine callback that prints partial transcription updates."""
+    print_lock = asyncio.Lock()
+
+    async def _printer(event: object) -> None:
+        if not isinstance(event, TranscriptionPartial):
+            return
+        text = event.text.strip()
+        if not text:
+            return
+        range_text = f"{_format_cursor(event.start_time)}-{_format_cursor(event.end_time)}s"
+        line = f"transcript partial | call {event.call_id} | {range_text} | {text}"
+        async with print_lock:
+            print(line, flush=True)
+
+    return _printer
+
+
+def _create_transcript_final_printer() -> ConsumerCallback:
+    """Return a coroutine callback that prints the final transcription result."""
+    print_lock = asyncio.Lock()
+
+    async def _printer(event: object) -> None:
+        if not isinstance(event, TranscriptionResult):
+            return
+        text = event.text.strip()
+        if not text:
+            return
+        line = f"transcript final | call {event.call_id} | {text}"
         async with print_lock:
             print(line, flush=True)
 
@@ -352,7 +464,7 @@ def _format_metadata(metadata: CallMetadata, limit: int) -> str:
 
 
 def _resolve_credentials(options: CliOptions) -> Credentials:
-    return load_credentials_from_environment(dotenv_path=options.dotenv_path)
+    return load_credentials_from_environment()
 
 
 async def _wait_for_shutdown_signal() -> None:
@@ -370,3 +482,31 @@ async def _wait_for_shutdown_signal() -> None:
     finally:
         for signum in registered:
             loop.remove_signal_handler(signum)
+
+
+async def _register_live_consumers(
+    client: BroadcastifyClient,
+    options: CliOptions,
+    metadata_limit: int,
+    transcription_cfg: TranscriptionConfig,
+) -> None:
+    """Register event and transcription consumers based on options."""
+    printer = _create_event_printer(metadata_limit)
+    if options.playlist_id is not None:
+        topic = f"calls.live.playlist.{options.playlist_id}"
+        await client.register_consumer(topic, printer)
+    else:
+        assert options.system_id is not None
+        for talkgroup_id in options.talkgroup_ids:
+            topic = f"calls.live.{options.system_id}.{talkgroup_id}"
+            await client.register_consumer(topic, printer)
+
+    if transcription_cfg.enabled:
+        await client.register_consumer(
+            "transcription.partial",
+            _create_transcript_partial_printer(),
+        )
+        await client.register_consumer(
+            "transcription.complete",
+            _create_transcript_final_printer(),
+        )

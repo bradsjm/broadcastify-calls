@@ -101,3 +101,13 @@ class Authenticator:
             return
         await self._backend.logout(self._token)
         self._token = None
+
+    def session_cookie_value(self) -> str | None:
+        """Return the current session cookie value if authenticated.
+
+        This exposes the value carried in the ``bcfyuser1`` cookie so that
+        cross-subdomain requests (e.g., to ``calls.broadcastify.com``) can include
+        the appropriate authentication header when the cookie's domain scoping
+        prevents implicit propagation.
+        """
+        return self._token.value if self._token is not None else None
