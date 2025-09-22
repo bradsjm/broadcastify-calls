@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
@@ -789,25 +789,31 @@ def _extract_source_descriptor(entry: LiveCallEntry) -> SourceDescriptor:
     identifier = entry.call_src
     label = entry.call_src_descr
 
-    metadata_sources = entry.metadata.get("srcList")
-    if isinstance(metadata_sources, Sequence) and metadata_sources:
-        first = metadata_sources[0]
-        if isinstance(first, Mapping):
+    # Metadata "srcList" is provider-defined; treat as a sequence of mappings.
+    metadata_sources_obj = entry.metadata.get("srcList")
+    if isinstance(metadata_sources_obj, Sequence) and metadata_sources_obj:
+        seq: Sequence[object] = cast(Sequence[object], metadata_sources_obj)
+        candidate_first: object = seq[0]
+        if isinstance(candidate_first, Mapping):
+            first: Mapping[str, object] = cast(Mapping[str, object], candidate_first)
             if identifier is None:
-                raw_identifier = first.get("src")
+                raw_identifier_obj = first.get("src")
                 try:
-                    identifier = int(raw_identifier) if raw_identifier is not None else None
+                    if isinstance(raw_identifier_obj, (int, str)):
+                        identifier = int(raw_identifier_obj)
+                    else:
+                        identifier = None
                 except (TypeError, ValueError):
                     identifier = None
             if label in (None, ""):
-                label_candidate = first.get("tag")
-                coerced = _coerce_str(label_candidate)
+                label_candidate_obj = first.get("tag")
+                coerced = _coerce_str(label_candidate_obj)
                 if coerced is not None:
                     label = coerced
 
     if label in (None, ""):
-        extra_label = entry.metadata.get("call_src_descr")
-        coerced = _coerce_str(extra_label)
+        extra_label_obj = cast(object | None, entry.metadata.get("call_src_descr"))
+        coerced = _coerce_str(extra_label_obj)
         if coerced is not None:
             label = coerced
 
