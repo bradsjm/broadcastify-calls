@@ -23,12 +23,12 @@ To add optional capabilities:
 
 ```bash
 uv sync --group dev --group transcription   # Whisper/OpenAI integration
-uv sync --group dev --group transcription_local   # Local Whisper (openai-whisper)
+uv sync --group dev --group transcription_local   # Local Whisper (faster-whisper)
 uv sync --group dev --group telemetry       # OpenTelemetry instrumentation
 ```
 
 If you enable transcription without configuring an API key, the client now falls back to the
-locally hosted Whisper backend provided by the `openai-whisper` package.
+locally hosted Whisper backend powered by the `faster-whisper` package.
 
 ## Common Tasks
 

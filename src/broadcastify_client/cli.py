@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import traceback
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -231,13 +232,8 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     if has_playlist and (has_system or has_talkgroups):
         parser.error("--playlist-id cannot be used with --system-id or --talkgroup-id")
     if not has_playlist:
-        if not has_system or not has_talkgroups:
-            parser.error(
-                (
-                    "When not using --playlist-id, both --system-id and at least one "
-                    "--talkgroup-id are required"
-                ),
-            )
+        if not has_system:
+            parser.error("--system-id is required when not using --playlist-id")
 
     return CliOptions(
         system_id=namespace.system_id if not has_playlist else None,
@@ -328,10 +324,17 @@ async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> N
         )
         return
     assert options.system_id is not None
-    for talkgroup_id in options.talkgroup_ids:
-        await client.create_live_producer(
+    if options.talkgroup_ids:
+        for talkgroup_id in options.talkgroup_ids:
+            await client.create_live_producer(
+                options.system_id,
+                talkgroup_id,
+                position=options.initial_position,
+                initial_history=options.history,
+            )
+    else:
+        await client.create_system_producer(
             options.system_id,
-            talkgroup_id,
             position=options.initial_position,
             initial_history=options.history,
         )
@@ -567,8 +570,12 @@ async def _register_live_consumers(
         await client.register_consumer(topic, printer)
     else:
         assert options.system_id is not None
-        for talkgroup_id in options.talkgroup_ids:
-            topic = f"calls.live.{options.system_id}.{talkgroup_id}"
+        if options.talkgroup_ids:
+            for talkgroup_id in options.talkgroup_ids:
+                topic = f"calls.live.{options.system_id}.{talkgroup_id}"
+                await client.register_consumer(topic, printer)
+        else:
+            topic = f"calls.live.system.{options.system_id}"
             await client.register_consumer(topic, printer)
 
     if transcription_cfg.enabled:
@@ -590,4 +597,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         exit_code = asyncio.run(run_async(options))
     except KeyboardInterrupt:
         exit_code = 130
+    except Exception:  # noqa: BLE001
+        traceback.print_exc(limit=1)
+        exit_code = 1
     raise SystemExit(exit_code)

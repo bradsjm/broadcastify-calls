@@ -1,4 +1,4 @@
-"""Local Whisper transcription backend using the open-source whisper package."""
+"""Local Whisper transcription backend using the faster-whisper package (retaining generic 'whisper' naming)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ import importlib
 import io
 import logging
 import tempfile
-from collections.abc import AsyncIterator, Callable, Mapping
-from typing import cast
+from collections.abc import AsyncIterator
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
@@ -21,18 +20,20 @@ _MODEL_ALIASES: dict[str, str] = {"whisper-1": "large-v3"}
 
 
 class LocalWhisperBackend:
-    """Transcription backend powered by a locally hosted Whisper model."""
+    """Transcription backend powered by a locally hosted faster-whisper model."""
 
     def __init__(self, config: TranscriptionConfig) -> None:
         """Initialise bookkeeping and validate local dependencies."""
         self._config = config
         try:
-            self._whisper = importlib.import_module("whisper")
+            module = importlib.import_module("faster_whisper")
         except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency missing
             raise TranscriptionError(
-                "whisper package not installed. Install with the 'transcription-local' extra."
+                "faster-whisper package not installed. Install with the 'transcription-local' extra."
             ) from exc
-
+        self._whisper_model_cls = getattr(module, "WhisperModel", None)
+        if self._whisper_model_cls is None:  # pragma: no cover - unexpected API surface
+            raise TranscriptionError("faster_whisper.WhisperModel not found in installed package")
         self._model_name = _MODEL_ALIASES.get(config.model, config.model)
         self._model: object | None = None
         self._load_lock = asyncio.Lock()
@@ -135,7 +136,10 @@ class LocalWhisperBackend:
             if self._model is None:
                 try:
                     self._model = await asyncio.to_thread(
-                        self._whisper.load_model, self._model_name
+                        self._whisper_model_cls,
+                        self._model_name,
+                        device=self._config.device,
+                        compute_type=self._config.compute_type,
                     )
                 except Exception as exc:  # pragma: no cover - propagate load errors
                     raise TranscriptionError(
@@ -159,23 +163,21 @@ class LocalWhisperBackend:
             tmp.write(payload)
             tmp.flush()
             try:
-                transcribe = model.transcribe  # type: ignore[attr-defined]
+                segments, _info = model.transcribe(  # type: ignore[attr-defined]
+                    tmp.name,
+                    language=self._config.language,
+                    condition_on_previous_text=False,
+                )
             except AttributeError as exc:  # pragma: no cover - unexpected API surface
                 raise TranscriptionError(
                     "Local Whisper model does not expose transcribe()"
                 ) from exc
-            typed_transcribe = cast(
-                Callable[..., Mapping[str, object]],
-                transcribe,
-            )
-            result = typed_transcribe(
-                tmp.name,
-                language=self._config.language,
-                verbose=False,
-                condition_on_previous_text=False,
-            )
-        text = ""
-        raw_text = result.get("text")
-        if isinstance(raw_text, str):
-            text = raw_text.strip()
+        parts: list[str] = []
+        for seg in segments:
+            seg_text = getattr(seg, "text", None)
+            if isinstance(seg_text, str):
+                cleaned = seg_text.strip()
+                if cleaned:
+                    parts.append(cleaned)
+        text = " ".join(parts).strip()
         return text

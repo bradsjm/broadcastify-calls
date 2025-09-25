@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "broadcastify-calls"
+name = "broadcastify_client"
 version = "0.1.0"
-description = "Async Broadcastify client scaffolding for consuming live and archived call feeds."
+description = "Broadcastify client for consuming live and archived call feeds."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "UNLICENSED" }
@@ -44,7 +44,7 @@ transcription = [
     "openai>=1.40.0",
 ]
 transcription-local = [
-    "openai-whisper>=20231117",
+    "faster-whisper>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -59,17 +59,18 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
-    "ruff>=0.6.9",
 ]
 telemetry = [
     "opentelemetry-instrumentation-httpx>=0.47b0",
     "opentelemetry-sdk>=1.28.0",
 ]
 transcription = [
+    "av>=15.1.0",
     "openai>=1.40.0",
 ]
 transcription_local = [
-    "openai-whisper>=20231117",
+    "av>=15.1.0",
+    "faster-whisper>=1.0.0",
 ]
 
 [tool.ruff]

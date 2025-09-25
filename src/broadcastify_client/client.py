@@ -69,7 +69,14 @@ class PlaylistSubscription:
     playlist_id: PlaylistId
 
 
-Subscription = TalkgroupSubscription | PlaylistSubscription
+@dataclass(frozen=True, slots=True)
+class SystemSubscription:
+    """Subscription descriptor targeting all talkgroups within a system."""
+
+    system_id: int
+
+
+Subscription = TalkgroupSubscription | PlaylistSubscription | SystemSubscription
 
 
 @dataclass(slots=True)
@@ -162,6 +169,12 @@ class AsyncBroadcastifyClient(Protocol):
         self, playlist_id: PlaylistId, *, position: float | None = None
     ) -> LiveSubscriptionHandle:  # pragma: no cover - protocol
         """Start a playlist live producer and return the tracking handle."""
+        ...
+
+    async def create_system_producer(
+        self, system_id: int, *, position: float | None = None
+    ) -> LiveSubscriptionHandle:  # pragma: no cover - protocol
+        """Start a system-wide live producer and return the tracking handle."""
         ...
 
     async def register_consumer(
@@ -368,6 +381,19 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     ) -> LiveSubscriptionHandle:
         """Create a playlist-driven live producer and return a handle for managing it."""
         subscription = PlaylistSubscription(playlist_id=playlist_id)
+        return await self._register_subscription(
+            subscription, position=position, initial_history=initial_history
+        )
+
+    async def create_system_producer(
+        self,
+        system_id: int,
+        *,
+        position: float | None = None,
+        initial_history: int | None = None,
+    ) -> LiveSubscriptionHandle:
+        """Create a system-wide live producer and return a handle for managing it."""
+        subscription = SystemSubscription(system_id=system_id)
         return await self._register_subscription(
             subscription, position=position, initial_history=initial_history
         )
@@ -724,7 +750,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     def _topic_for_subscription(self, subscription: Subscription) -> str:
         if isinstance(subscription, TalkgroupSubscription):
             return f"{self._live_topic}.{subscription.system_id}.{subscription.talkgroup_id}"
-        return f"{self._live_topic}.playlist.{subscription.playlist_id}"
+        if isinstance(subscription, PlaylistSubscription):
+            return f"{self._live_topic}.playlist.{subscription.playlist_id}"
+        # System-wide subscription
+        return f"{self._live_topic}.system.{subscription.system_id}"
 
     def _call_topic(self, system_id: int, talkgroup_id: int) -> str:
         return f"{self._live_topic}.{system_id}.{talkgroup_id}"
@@ -798,10 +827,15 @@ class _HttpCallPoller(CallPoller):
                 f"{self._subscription.system_id}-{self._subscription.talkgroup_id}"
             )
             payload["systemId"] = str(self._subscription.system_id)
-        else:
+            payload.setdefault("sid", "0")
+        elif isinstance(self._subscription, PlaylistSubscription):
             payload["playlist_uuid"] = self._subscription.playlist_id
             payload["systemId"] = "0"
-        payload.setdefault("sid", "0")
+            payload.setdefault("sid", "0")
+        else:
+            # System-wide: receive all talkgroups for a system
+            payload["systemId"] = "0"
+            payload["sid"] = str(self._subscription.system_id)
         return payload
 
     def _calculate_cursor(

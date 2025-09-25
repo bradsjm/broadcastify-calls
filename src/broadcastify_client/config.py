@@ -110,9 +110,10 @@ class TranscriptionConfig(BaseModel):
     """Settings for the optional speech-to-text (STT) pipeline.
 
     The default provider targets an OpenAI-compatible Whisper endpoint. Configure the
-    ``endpoint`` and ``api_key`` to point at a compatible server (e.g. OpenAI, local
-    Whisper service implementing the OpenAI API surface). When no API key is configured,
-    the client falls back to a local Whisper model bundled via the ``whisper`` package.
+    ``endpoint`` and ``api_key`` to point at a compatible server (e.g. OpenAI, local service).
+    When no API key is configured, the client falls back to a local model powered by the
+    faster-whisper package (imported dynamically) retaining generic 'whisper' naming. Local
+    fields `device` and `compute_type` tune hardware and precision.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -136,6 +137,20 @@ class TranscriptionConfig(BaseModel):
         description=(
             "Model identifier to use for speech-to-text (e.g. 'whisper-1') "
             "variable OPENAI_WHISPER_MODEL is used as a default."
+        ),
+    )
+    device: str = Field(
+        default="cpu",
+        description=(
+            "Hardware device for local faster-whisper models (e.g. 'cpu', 'cuda', 'auto'). "
+            "Ignored for remote providers."
+        ),
+    )
+    compute_type: str = Field(
+        default="int8",
+        description=(
+            "Compute/precision type for local faster-whisper models "
+            "(e.g. 'int8', 'int8_float16', 'float16', 'float32'). Ignored for remote providers."
         ),
     )
     language: str | None = Field(

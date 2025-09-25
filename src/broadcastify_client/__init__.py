@@ -8,6 +8,7 @@ from .client import (
     BroadcastifyClientDependencies,
     LiveSubscriptionHandle,
     PlaylistSubscription,
+    SystemSubscription,
     TalkgroupSubscription,
 )
 from .config import (
@@ -61,6 +62,7 @@ __all__ = [
     "SearchResultPage",
     "SessionToken",
     "SourceDescriptor",
+    "SystemSubscription",
     "SystemSummary",
     "TalkgroupSubscription",
     "TalkgroupSummary",
