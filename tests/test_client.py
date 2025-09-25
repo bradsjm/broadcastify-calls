@@ -20,6 +20,7 @@ from broadcastify_client import (
     LiveCallEnvelope,
     SessionToken,
     TimeWindow,
+    TranscriptionConfig,
 )
 from broadcastify_client.archives import ArchiveClient
 from broadcastify_client.audio_consumer import AudioConsumer
@@ -176,6 +177,80 @@ class StubAudioDownloader:
             )
 
         return _iterator()
+
+
+@pytest.mark.asyncio
+async def test_transcription_defaults_to_local_when_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the client uses the local backend if no API key is configured."""
+    local_calls: list[TranscriptionConfig] = []
+
+    class DummyLocalBackend:
+        def __init__(self, config: TranscriptionConfig) -> None:
+            local_calls.append(config)
+
+        async def stream_transcription(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+            raise NotImplementedError
+
+        async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+            raise NotImplementedError
+
+    class FailingOpenAIBackend:
+        def __init__(self, config: TranscriptionConfig) -> None:
+            raise AssertionError("OpenAI backend should not be used when API key is missing")
+
+    monkeypatch.setattr("broadcastify_client.client.LocalWhisperBackend", DummyLocalBackend)
+    monkeypatch.setattr("broadcastify_client.client.OpenAIWhisperBackend", FailingOpenAIBackend)
+
+    dependencies = BroadcastifyClientDependencies(
+        transcription_config=TranscriptionConfig(enabled=True, provider="openai", api_key=None),
+        http_client=StubHttpClient(),
+    )
+    client = BroadcastifyClient(dependencies=dependencies)
+    await client.start()
+    try:
+        assert len(local_calls) == 1
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_transcription_respects_local_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit local provider should bypass OpenAI backend entirely."""
+    local_calls: list[TranscriptionConfig] = []
+    openai_calls: list[TranscriptionConfig] = []
+
+    class DummyLocalBackend:
+        def __init__(self, config: TranscriptionConfig) -> None:
+            local_calls.append(config)
+
+        async def stream_transcription(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+            raise NotImplementedError
+
+        async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+            raise NotImplementedError
+
+    class RecordingOpenAIBackend:
+        def __init__(self, config: TranscriptionConfig) -> None:
+            openai_calls.append(config)
+
+    monkeypatch.setattr("broadcastify_client.client.LocalWhisperBackend", DummyLocalBackend)
+    monkeypatch.setattr("broadcastify_client.client.OpenAIWhisperBackend", RecordingOpenAIBackend)
+
+    dependencies = BroadcastifyClientDependencies(
+        transcription_config=TranscriptionConfig(enabled=True, provider="local"),
+        http_client=StubHttpClient(),
+    )
+    client = BroadcastifyClient(dependencies=dependencies)
+    await client.start()
+    try:
+        assert len(local_calls) == 1
+        assert not openai_calls
+    finally:
+        await client.shutdown()
 
 
 @pytest.mark.asyncio

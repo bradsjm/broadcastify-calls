@@ -43,6 +43,9 @@ telemetry = [
 transcription = [
     "openai>=1.40.0",
 ]
+transcription-local = [
+    "openai-whisper>=20231117",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -64,6 +67,9 @@ telemetry = [
 ]
 transcription = [
     "openai>=1.40.0",
+]
+transcription_local = [
+    "openai-whisper>=20231117",
 ]
 
 [tool.ruff]

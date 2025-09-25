@@ -10,3 +10,6 @@ opentelemetry-sdk>=1.28.0
 
 [transcription]
 openai>=1.40.0
+
+[transcription-local]
+openai-whisper>=20231117

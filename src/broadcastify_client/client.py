@@ -47,7 +47,8 @@ from .telemetry import (
     PollMetrics,
     TelemetrySink,
 )
-from .transcription import TranscriptionPipeline
+from .transcription import TranscriptionBackend, TranscriptionPipeline
+from .transcription_local import LocalWhisperBackend
 from .transcription_openai import OpenAIWhisperBackend
 
 logger = logging.getLogger(__name__)
@@ -322,6 +323,14 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._transcription_buffers: dict[CallId, list[AudioChunkEvent]] = {}
         logger.debug("BroadcastifyClient initialised")
 
+    def _create_transcription_backend(self) -> TranscriptionBackend:
+        config = self._transcription_config
+        if config.provider == "local" or (config.provider == "openai" and not config.api_key):
+            return LocalWhisperBackend(config)
+        if config.provider in {"openai", "external"}:
+            return OpenAIWhisperBackend(config)
+        raise NotImplementedError(f"Transcription provider '{config.provider}' is not supported")
+
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate against Broadcastify and return a validated session token."""
         return await self._authenticator.authenticate(credentials)
@@ -399,10 +408,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 return
             # Lazily initialise transcription pipeline if enabled
             if self._transcription_config.enabled and self._transcription_pipeline is None:
-                if self._transcription_config.provider == "openai":
-                    backend = OpenAIWhisperBackend(self._transcription_config)
-                else:
-                    raise NotImplementedError("Only 'openai' transcription provider is implemented")
+                backend = self._create_transcription_backend()
                 self._transcription_pipeline = TranscriptionPipeline(
                     backend, telemetry=self._telemetry
                 )

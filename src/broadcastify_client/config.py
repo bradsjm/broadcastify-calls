@@ -111,12 +111,13 @@ class TranscriptionConfig(BaseModel):
 
     The default provider targets an OpenAI-compatible Whisper endpoint. Configure the
     ``endpoint`` and ``api_key`` to point at a compatible server (e.g. OpenAI, local
-    Whisper service implementing the OpenAI API surface).
+    Whisper service implementing the OpenAI API surface). When no API key is configured,
+    the client falls back to a local Whisper model bundled via the ``whisper`` package.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    provider: Literal["openai", "external"] = Field(
+    provider: Literal["openai", "external", "local"] = Field(
         default="openai", description="Identifier for the transcription provider"
     )
     enabled: bool = Field(default=False, description="Whether transcription is enabled")

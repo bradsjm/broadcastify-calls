@@ -25,5 +25,6 @@ src/broadcastify_client/py.typed
 src/broadcastify_client/schemas.py
 src/broadcastify_client/telemetry.py
 src/broadcastify_client/transcription.py
+src/broadcastify_client/transcription_local.py
 src/broadcastify_client/transcription_openai.py
 tests/test_client.py
