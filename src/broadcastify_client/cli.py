@@ -67,9 +67,7 @@ async def run_async(options: CliOptions) -> int:
     # Load .env early so subsequent resolution sees overrides. Use override=True to
     # ensure .env values take precedence over existing environment variables.
     dotenv_file = (
-        str(options.dotenv_path)
-        if options.dotenv_path is not None
-        else find_dotenv(usecwd=True)
+        str(options.dotenv_path) if options.dotenv_path is not None else find_dotenv(usecwd=True)
     )
     if dotenv_file:
         load_dotenv(dotenv_file, override=True)
@@ -186,9 +184,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         "--history",
         type=int,
         default=0,
-        help=(
-            "Number of historical calls to emit on first fetch (0 = live only)."
-        ),
+        help=("Number of historical calls to emit on first fetch (0 = live only)."),
     )
     parser.add_argument(
         "--dotenv",
@@ -283,9 +279,7 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
     detail_lines: list[str] = []
     # Additional human-friendly talkgroup detail expected by tests
     if call.talkgroup_description:
-        detail_lines.append(
-            f"  talkgroup {call.talkgroup_id} ({call.talkgroup_description})"
-        )
+        detail_lines.append(f"  talkgroup {call.talkgroup_id} ({call.talkgroup_description})")
     if call.talkgroup_description:
         detail_lines.append(f"  description: {call.talkgroup_description}")
     metadata_text = _format_metadata(call.metadata, metadata_limit)
@@ -294,16 +288,6 @@ def format_call_event(event: LiveCallEnvelope, *, metadata_limit: int) -> str:
     if detail_lines:
         return "\n".join([header, *detail_lines])
     return header
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    """Entry point for the ``broadcastify_calls`` console script."""
-    options = parse_cli_args(argv)
-    try:
-        exit_code = asyncio.run(run_async(options))
-    except KeyboardInterrupt:
-        exit_code = 130
-    raise SystemExit(exit_code)
 
 
 def _resolve_transcription_config(
@@ -424,8 +408,7 @@ def _create_transcript_partial_printer(gate: _TranscriptGate) -> ConsumerCallbac
         if not text:
             return
         await gate.mark_partial(event.call_id)
-        range_text = f"{_format_cursor(event.start_time)}-{_format_cursor(event.end_time)}s"
-        line = f"  transcript partial | call {event.call_id} | {range_text} | {text}"
+        line = f"  -> {text}"
         async with print_lock:
             print(line, flush=True)
 
@@ -447,11 +430,12 @@ def _create_transcript_final_printer(gate: _TranscriptGate) -> ConsumerCallback:
             return
         if not await gate.should_print_final(event.call_id):
             return
-        line = f"  transcript final | call {event.call_id} | {text}"
+        line = f"  --> {text}"
         async with print_lock:
             print(line, flush=True)
 
     return _printer
+
 
 def _format_event_header(event: LiveCallEnvelope) -> str:
     """Return a compact, single-line header summarizing the call event."""
@@ -461,15 +445,12 @@ def _format_event_header(event: LiveCallEnvelope) -> str:
     group_text = _format_group(call.talkgroup_label, call.talkgroup_id)
     source_text = _format_source(call.source)
     duration_text = _format_duration(call.duration_seconds)
-    frequency = _format_frequency(call.frequency_mhz)
     components = [
         timestamp,
         system_text,
         group_text,
         source_text,
-        f"call {call.call_id}",
         f"duration {duration_text}",
-        f"freq {frequency}",
     ]
     return " | ".join(components)
 
@@ -600,3 +581,13 @@ async def _register_live_consumers(
             "transcription.complete",
             _create_transcript_final_printer(gate),
         )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Entry point for the ``broadcastify_calls`` console script."""
+    options = parse_cli_args(argv)
+    try:
+        exit_code = asyncio.run(run_async(options))
+    except KeyboardInterrupt:
+        exit_code = 130
+    raise SystemExit(exit_code)
