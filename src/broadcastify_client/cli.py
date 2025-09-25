@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -61,11 +62,7 @@ class CliOptions:
 
 async def run_async(options: CliOptions) -> int:
     """Execute the CLI workflow and return the process exit code."""
-    logging.basicConfig(
-        level=options.log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    logger = logging.getLogger("broadcastify_client.cli")
+    logger = _setup_logging(options.log_level)
 
     # Load .env early so subsequent resolution sees overrides. Use override=True to
     # ensure .env values take precedence over existing environment variables.
@@ -131,6 +128,21 @@ async def run_async(options: CliOptions) -> int:
                 logger.warning("Failed to logout cleanly: %s", exc)
         await client.shutdown()
     return 0
+
+
+def _setup_logging(log_level: int) -> logging.Logger:
+    """Configure logging and return the CLI logger.
+
+    Reduces noise from network libraries at non-DEBUG levels.
+    """
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    if log_level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+    return logging.getLogger("broadcastify_client.cli")
 
 
 def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
@@ -357,14 +369,51 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     async def _printer(event: object) -> None:
         if not isinstance(event, LiveCallEnvelope):
             return
-        line = format_call_event(event, metadata_limit=metadata_limit)
+        # Print a compact, single-line header that prioritizes the most useful info
+        # for live monitoring. We intentionally omit verbose fields (cursor, expires,
+        # extra detail lines) to keep output readable during active incidents.
+        line = _format_event_header(event)
         async with print_lock:
             print(line, flush=True)
 
     return _printer
 
 
-def _create_transcript_partial_printer() -> ConsumerCallback:
+class _TranscriptGate:
+    """Gate printing of transcripts to avoid repeating partial and final outputs.
+
+    Policy: if any partials were printed for a call_id, suppress the final; otherwise,
+    print the final. A small LRU prevents unbounded growth for long-running sessions.
+    """
+
+    __slots__ = ("_capacity", "_lock", "_seen_partials")
+
+    def __init__(self, capacity: int = 2048) -> None:
+        self._seen_partials: OrderedDict[str, None] = OrderedDict()
+        self._lock = asyncio.Lock()
+        self._capacity = capacity
+
+    async def mark_partial(self, call_id: str) -> None:
+        async with self._lock:
+            # Move-to-end semantics for LRU behavior
+            self._seen_partials.pop(call_id, None)
+            self._seen_partials[call_id] = None
+            # Trim to capacity
+            while len(self._seen_partials) > self._capacity:
+                self._seen_partials.popitem(last=False)
+
+    async def should_print_final(self, call_id: str) -> bool:
+        async with self._lock:
+            if call_id in self._seen_partials:
+                # Consume and suppress the final to avoid repetition
+                self._seen_partials.pop(call_id, None)
+                return False
+            # No partials were printed; allow the final and ensure we don't keep state
+            self._seen_partials.pop(call_id, None)
+            return True
+
+
+def _create_transcript_partial_printer(gate: _TranscriptGate) -> ConsumerCallback:
     """Return a coroutine callback that prints partial transcription updates."""
     print_lock = asyncio.Lock()
 
@@ -374,16 +423,20 @@ def _create_transcript_partial_printer() -> ConsumerCallback:
         text = event.text.strip()
         if not text:
             return
+        await gate.mark_partial(event.call_id)
         range_text = f"{_format_cursor(event.start_time)}-{_format_cursor(event.end_time)}s"
-        line = f"transcript partial | call {event.call_id} | {range_text} | {text}"
+        line = f"  transcript partial | call {event.call_id} | {range_text} | {text}"
         async with print_lock:
             print(line, flush=True)
 
     return _printer
 
 
-def _create_transcript_final_printer() -> ConsumerCallback:
-    """Return a coroutine callback that prints the final transcription result."""
+def _create_transcript_final_printer(gate: _TranscriptGate) -> ConsumerCallback:
+    """Return a coroutine callback that prints the final transcription result.
+
+    Final output is suppressed if partials for the call were already printed.
+    """
     print_lock = asyncio.Lock()
 
     async def _printer(event: object) -> None:
@@ -392,11 +445,33 @@ def _create_transcript_final_printer() -> ConsumerCallback:
         text = event.text.strip()
         if not text:
             return
-        line = f"transcript final | call {event.call_id} | {text}"
+        if not await gate.should_print_final(event.call_id):
+            return
+        line = f"  transcript final | call {event.call_id} | {text}"
         async with print_lock:
             print(line, flush=True)
 
     return _printer
+
+def _format_event_header(event: LiveCallEnvelope) -> str:
+    """Return a compact, single-line header summarizing the call event."""
+    call = event.call
+    timestamp = _format_timestamp(call.received_at)
+    system_text = _format_system(call.system_name, call.system_id)
+    group_text = _format_group(call.talkgroup_label, call.talkgroup_id)
+    source_text = _format_source(call.source)
+    duration_text = _format_duration(call.duration_seconds)
+    frequency = _format_frequency(call.frequency_mhz)
+    components = [
+        timestamp,
+        system_text,
+        group_text,
+        source_text,
+        f"call {call.call_id}",
+        f"duration {duration_text}",
+        f"freq {frequency}",
+    ]
+    return " | ".join(components)
 
 
 def _format_timestamp(value: datetime) -> str:
@@ -516,11 +591,12 @@ async def _register_live_consumers(
             await client.register_consumer(topic, printer)
 
     if transcription_cfg.enabled:
+        gate = _TranscriptGate()
         await client.register_consumer(
             "transcription.partial",
-            _create_transcript_partial_printer(),
+            _create_transcript_partial_printer(gate),
         )
         await client.register_consumer(
             "transcription.complete",
-            _create_transcript_final_printer(),
+            _create_transcript_final_printer(gate),
         )
