@@ -20,3 +20,6 @@ uv.lock
 
 # Environment
 .env
+
+# Egg
+*.egg-info/

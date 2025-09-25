@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Broadcastify client for consuming live and archived call feeds."
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "UNLICENSED" }
+license = "MIT"
 authors = [
     { name = "Jonathan Bradshaw" },
 ]
@@ -16,7 +16,6 @@ keywords = ["broadcastify", "asyncio", "event-driven", "audio", "telemetry"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
