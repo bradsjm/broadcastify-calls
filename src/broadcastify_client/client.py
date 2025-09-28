@@ -15,9 +15,16 @@ from uuid import uuid4
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
 from .audio_downloader_http import HttpAudioDownloader
+from .audio_preprocess import AudioPreprocessError, AudioPreprocessor
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
-from .config import Credentials, HttpClientConfig, LiveProducerConfig, TranscriptionConfig
-from .errors import AudioDownloadError, LiveSessionError
+from .config import (
+    AudioPreprocessConfig,
+    Credentials,
+    HttpClientConfig,
+    LiveProducerConfig,
+    TranscriptionConfig,
+)
+from .errors import AudioDownloadError, LiveSessionError, TranscriptionError
 from .eventbus import ConsumerCallback, EventBus
 from .http import AsyncHttpClientProtocol, BroadcastifyHttpClient
 from .live_producer import CallPoller, LiveCallProducer
@@ -296,6 +303,7 @@ class BroadcastifyClientDependencies:
     call_poller_factory: CallPollerFactory | None = None
     audio_consumer_factory: Callable[[], AudioConsumer] | None = None
     transcription_config: TranscriptionConfig | None = None
+    preprocess_config: AudioPreprocessConfig | None = None
     playlist_catalog: PlaylistCatalog | None = None
     discovery_client: DiscoveryService | None = None
 
@@ -326,6 +334,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._discovery_client = deps.discovery_client
         self._transcription_config = deps.transcription_config or TranscriptionConfig()
         self._transcription_pipeline: TranscriptionPipeline | None = None
+        if deps.preprocess_config is not None:
+            self._preprocess_config = deps.preprocess_config
+        else:
+            # Enable preprocessing by default when transcription is enabled
+            self._preprocess_config = AudioPreprocessConfig(
+                enabled=bool(self._transcription_config.enabled)
+            )
+        self._preprocessor: AudioPreprocessor | None = (
+            AudioPreprocessor(self._preprocess_config) if self._preprocess_config.enabled else None
+        )
         self._producer_handles: dict[str, ProducerHandle] = {}
         self._handles_lock = asyncio.Lock()
         self._started = False
@@ -662,6 +680,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             while True:
                 chunk = await queue.get()
                 try:
+                    # Phase 1 pre-processing: band-limit + tail trim (if enabled)
+                    if self._preprocessor is not None:
+                        try:
+                            chunk = self._preprocessor.process_chunk(chunk)
+                        except AudioPreprocessError as exc:  # pragma: no cover - defensive path
+                            logger.warning(
+                                "Audio pre-processing failed for call %s: %s",
+                                chunk.call_id,
+                                exc,
+                            )
                     await self._event_bus.publish(self._audio_topic, chunk)
                     await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
                     # Fan-out to transcription pipeline when enabled
@@ -700,8 +728,11 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                                     await self._event_bus.publish(
                                         self._transcript_final_topic, result
                                     )
-                                except Exception:
-                                    logger.exception("Final transcription failed for call %s", call)
+                                except TranscriptionError as exc:
+                                    logger.error(
+                                        "Final transcription failed for call %s: %s", call, exc
+                                    )
+                                # Unexpected errors propagate and will be handled by task context.
 
                             finalize_task = asyncio.create_task(_finalize(call_id, pipeline))
 

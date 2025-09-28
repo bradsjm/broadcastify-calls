@@ -51,11 +51,11 @@ class TranscriptionPipeline:
             partial_stream = self._backend.stream_transcription(audio_stream)
             async for partial in partial_stream:
                 yield partial
-        except TranscriptionError:
-            logger.warning("Streaming transcription backend raised TranscriptionError")
+        except TranscriptionError as exc:
+            logger.error("Streaming transcription failed: %s", exc)
             raise
         except Exception as exc:  # pragma: no cover - defensive path
-            logger.exception("Unexpected streaming transcription failure")
+            logger.error("Streaming transcription failed: %s", exc)
             raise TranscriptionError(str(exc)) from exc
 
     async def transcribe_final(
@@ -65,9 +65,9 @@ class TranscriptionPipeline:
         try:
             logger.debug("Starting final transcription")
             return await self._backend.finalize(audio_stream)
-        except TranscriptionError:
-            logger.warning("Final transcription backend raised TranscriptionError")
+        except TranscriptionError as exc:
+            logger.error("Final transcription failed: %s", exc)
             raise
         except Exception as exc:  # pragma: no cover - defensive path
-            logger.exception("Unexpected final transcription failure")
+            logger.error("Final transcription failed: %s", exc)
             raise TranscriptionError(str(exc)) from exc

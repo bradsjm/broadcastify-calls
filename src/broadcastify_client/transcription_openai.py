@@ -89,10 +89,11 @@ class OpenAIWhisperBackend:
         end_time: float = 0.0
         chunk_index = 0
         semaphore = asyncio.Semaphore(self._config.max_concurrency)
+        last_mime: str | None = None
 
-        async def flush_batch(data: bytes) -> str:
+        async def flush_batch(data: bytes, mime: str | None) -> str:
             async with semaphore:
-                return await self._transcribe_bytes(data)
+                return await self._transcribe_bytes(data, content_type=mime)
 
         async for chunk in audio_stream:
             if not has_buffer:
@@ -100,6 +101,7 @@ class OpenAIWhisperBackend:
                 has_buffer = True
             end_time = chunk.end_offset
             buffer.write(chunk.payload)
+            last_mime = chunk.content_type or last_mime
             duration = end_time - start_time
             should_flush = duration >= float(self._config.chunk_seconds) or chunk.finished
             if should_flush:
@@ -117,7 +119,7 @@ class OpenAIWhisperBackend:
                     )
                 else:
                     try:
-                        text = await flush_batch(data)
+                        text = await flush_batch(data, last_mime)
                     except TranscriptionError as exc:
                         logger.warning("Transcription batch failed (non-fatal): %s", exc)
                         text = ""
@@ -136,9 +138,11 @@ class OpenAIWhisperBackend:
         """Return a single transcription result for the entire audio stream."""
         buffer = io.BytesIO()
         call_id: str | None = None
+        last_mime: str | None = None
         async for chunk in audio_stream:
             call_id = chunk.call_id
             buffer.write(chunk.payload)
+            last_mime = chunk.content_type or last_mime
         if call_id is None:
             # With no audio events, preserve API semantics by returning an empty result.
             return TranscriptionResult(
@@ -161,7 +165,7 @@ class OpenAIWhisperBackend:
             text = ""
         else:
             try:
-                text = await self._transcribe_bytes(data)
+                text = await self._transcribe_bytes(data, content_type=last_mime)
             except TranscriptionError as exc:
                 logger.warning("Final transcription failed (non-fatal): %s", exc)
                 text = ""
@@ -174,13 +178,32 @@ class OpenAIWhisperBackend:
             segments=(),
         )
 
-    async def _transcribe_bytes(self, data: bytes) -> str:
-        """Call the provider transcription endpoint with the given bytes and return text."""
+    async def _transcribe_bytes(self, data: bytes, *, content_type: str | None = None) -> str:
+        """Call the provider transcription endpoint with the given bytes and return text.
+
+        Respects ``content_type`` when provided to set the filename and MIME type for
+        the multipart upload. Falls back to ``audio/mpeg`` if not specified.
+        """
+        mime = (content_type or "").lower() or "audio/mpeg"
+
+        def _guess_extension(ct: str) -> str:
+            if ct in {"audio/wav", "audio/x-wav"}:
+                return ".wav"
+            if ct in {"audio/mpeg", "audio/mp3"}:
+                return ".mp3"
+            if ct in {"audio/mp4", "audio/aac", "audio/m4a"}:
+                return ".m4a"
+            if ct == "audio/flac":
+                return ".flac"
+            return ".bin"
+
+        ext = _guess_extension(mime)
+        filename = f"audio{ext}"
+
         # Use the OpenAI audio transcriptions endpoint via the files API.
-        # The official SDK exposes it via ``audio.transcriptions.create``.
         response = await self._client.audio.transcriptions.create(  # type: ignore[reportUnknownMemberType]
             model=self._config.model,
-            file=("audio.mp3", io.BytesIO(data), "audio/mpeg"),
+            file=(filename, io.BytesIO(data), mime),
             language=self._config.language,
         )
 

@@ -208,6 +208,43 @@ class TranscriptionConfig(BaseModel):
         )
 
 
+class AudioPreprocessConfig(BaseModel):
+    """Settings controlling optional in-memory audio pre-processing.
+
+    Phase 1 focuses on voice-band limiting and tail-silence trimming to remove
+    squelch closures and courtesy tones/beeps at the end of recordings. All
+    processing occurs in-memory via PyAV (libav) without external executables
+    or temporary files.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable audio pre-processing (band-limit and tail silence trimming)."
+        ),
+    )
+    sample_rate: int = Field(
+        default=16_000,
+        ge=8000,
+        description="Target sample rate (Hz) for processed audio",
+    )
+    mono: bool = Field(default=True, description="Downmix to mono if input is multi-channel")
+    highpass_hz: int = Field(
+        default=250, description="High-pass cutoff frequency (Hz) to remove rumble/squelch"
+    )
+    lowpass_hz: int = Field(
+        default=3400, description="Low-pass cutoff frequency (Hz) to match P25 voice band"
+    )
+    tail_silence_threshold_db: float = Field(
+        default=-35.0, description="Silence threshold (dB) for tail trimming"
+    )
+    tail_silence_min_ms: int = Field(
+        default=200, ge=0, description="Minimum trailing silence (ms) to trim from tail"
+    )
+
+
 def load_credentials_from_environment(*, env: Mapping[str, str] | None = None) -> Credentials:
     """Load Broadcastify credentials from environment variables.
 

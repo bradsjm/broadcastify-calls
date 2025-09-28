@@ -1,4 +1,7 @@
-"""Local Whisper transcription backend using the faster-whisper package (retaining generic 'whisper' naming)."""
+"""Local Whisper transcription backend using the faster-whisper package.
+
+This backend retains the generic 'whisper' naming for compatibility.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +11,7 @@ import io
 import logging
 import tempfile
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
@@ -29,7 +33,10 @@ class LocalWhisperBackend:
             module = importlib.import_module("faster_whisper")
         except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency missing
             raise TranscriptionError(
-                "faster-whisper package not installed. Install with the 'transcription-local' extra."
+                
+                    "faster-whisper package not installed. "
+                    "Install with the 'transcription-local' extra."
+                
             ) from exc
         self._whisper_model_cls = getattr(module, "WhisperModel", None)
         if self._whisper_model_cls is None:  # pragma: no cover - unexpected API surface
@@ -135,8 +142,9 @@ class LocalWhisperBackend:
         async with self._load_lock:
             if self._model is None:
                 try:
+                    model_cls = cast(Any, self._whisper_model_cls)
                     self._model = await asyncio.to_thread(
-                        self._whisper_model_cls,
+                        model_cls,
                         self._model_name,
                         device=self._config.device,
                         compute_type=self._config.compute_type,
@@ -173,6 +181,7 @@ class LocalWhisperBackend:
                     "Local Whisper model does not expose transcribe()"
                 ) from exc
         parts: list[str] = []
+        segments = cast(list[Any], segments)
         for seg in segments:
             seg_text = getattr(seg, "text", None)
             if isinstance(seg_text, str):
