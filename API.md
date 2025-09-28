@@ -40,7 +40,7 @@ broadcastify_client/
 - **Event Flow:**
   1. `LiveCallProducer` polls Broadcastify on an interval, pushes `CallEvent` objects into an `asyncio.Queue`.
   2. `AudioConsumer` listens on the queue, streams audio chunks, and emits `AudioChunkEvent` for downstream consumers.
-  3. Optional `TranscriptionPipeline` subscribes to audio events, batches chunks, and streams them to a Whisper endpoint.
+  3. Optional `TranscriptionPipeline` performs final-only transcription. The client preprocesses audio (band-limit + tail trim), segments calls by silence (P25 half‑duplex), transcribes per segment, emits segment events, and publishes a concatenated final.
   4. Applications register additional consumers (analytics, persistence) via `EventBus.subscribe(topic, callback)`.
 - Dependency injection allows swapping HTTP client (e.g., `aiohttp`, `httpx.AsyncClient`), cache backend, and transcription provider.
 
@@ -171,14 +171,13 @@ class LiveCallEnvelope:
 
 ### 3.4 Audio Pipeline (Consumer)
 
-- `AudioConsumer` subscribes to `LiveCallEnvelope` queue, downloads MP3 via async streaming (`httpx.AsyncClient.stream()` or equivalent) with spoof headers.
-- Emits `AudioChunkEvent` objects containing call metadata plus streamed bytes, enabling multiple downstream consumers.
-- Supports retry policy, bandwidth throttling, and optional deduplication via persistent store.
-- The client republishes chunks on `calls.audio` and per-call channels `calls.audio.{callId}`, mirroring the live-call topic topology for downstream consumers (transcription, storage, analytics).
+- `AudioConsumer` subscribes to `LiveCallEnvelope` queue and downloads the call audio asset once from Broadcastify’s calls CDN. The provider typically serves AAC in MP4/M4A (extension `m4a`).
+- An `AudioChunkEvent` (usually a single final chunk) is emitted with the response body and the server’s `Content-Type` header.
+- The client republishes chunks on `calls.audio` and per-call channels `calls.audio.{callId}` for downstream consumers (transcription, storage, analytics).
 
-### 3.5 Near Real-Time Transcription
+### 3.5 Transcription (final-only with segmentation)
 
-#### Configuration
+#### Configuration (high level)
 
 ```python
 @dataclass(frozen=True)
@@ -189,18 +188,22 @@ class TranscriptionConfig:
     endpoint_url: Optional[str] = None
     api_key: Optional[str] = None
     language: Optional[str] = "en"
-    chunk_seconds: int = 10
     max_concurrency: int = 2
-    retry_policy: RetryPolicy = RetryPolicy()
-    emit_partial_results: bool = True
+    # Note: chunk-based streaming and partials are removed.
 ```
 
-#### Async Workflow
+Preprocessing is enabled by default when transcription is enabled. The audio is band‑limited (250–3400 Hz) and trailing silence is trimmed. Calls are segmented by silence (e.g., ≥200 ms below −35 dB) to approximate speaker turns in half‑duplex P25.
 
-1. `TranscriptionPipeline` subscribes to `AudioChunkEvent` stream.
-2. Chunks are buffered per call ID until `chunk_seconds` elapsed; buffers processed in worker tasks submitted via `asyncio.create_task` with concurrency guard (`asyncio.Semaphore`).
-3. Each task posts multipart requests to the Whisper endpoint (`Authorization: Bearer {api_key}`) and awaits JSON response.
-4. Partial transcripts emitted through `EventBus` topic `"transcription.partial"`; final transcripts via `"transcription.complete"`.
+#### Workflow
+
+1. On call completion, the client concatenates raw bytes and applies preprocessing and silence-based segmentation.
+2. Each segment (WAV/PCM16, 16 kHz mono) is sent as a single finalize request to the provider.
+3. The client publishes per-segment events and then a concatenated final.
+
+#### Topics
+
+- `transcription.segment` — per‑segment text as it completes.
+- `transcription.complete` — final concatenated transcript for the call.
 
 #### Models
 
@@ -212,12 +215,12 @@ class AudioChunkEvent:
     start_offset: float
     end_offset: float
     payload: bytes
-    content_type: str  # e.g., "audio/mpeg"
+    content_type: str  # e.g., "audio/mp4" (m4a) or "audio/wav" after preprocessing
 
 @dataclass(frozen=True)
-class TranscriptionPartial:
+class TranscriptionSegment:
     call_id: str
-    chunk_index: int
+    segment_index: int
     start_time: float
     end_time: float
     text: str
@@ -229,13 +232,13 @@ class TranscriptionResult:
     text: str
     language: str
     average_logprob: Optional[float]
-    segments: Sequence[TranscriptionPartial]
+    segments: Sequence[TranscriptionSegment]
 ```
 
 #### Error Handling
 
-- Whisper failures → `TranscriptionError` with provider metadata; pipeline may retry according to policy or emit `EventBus` error event.
-- Network errors bubble as `TransportError`; catastrophic failures trigger backoff to avoid hammering provider.
+- Provider failures → `TranscriptionError` recorded and logged concisely; the client proceeds with remaining segments and still emits a final (concatenation of successful segments).
+- Network errors bubble as `TransportError`; catastrophic failures trigger backoff to avoid hammering the provider.
 
 ## 4. Data Models (Summary)
 
