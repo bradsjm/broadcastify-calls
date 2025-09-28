@@ -45,6 +45,8 @@ from .models import (
     SourceDescriptor,
     SystemSummary,
     TalkgroupSummary,
+    TranscriptionResult,
+    TranscriptionSegment,
 )
 from .schemas import LiveCallEntry, LiveCallsResponse
 from .telemetry import (
@@ -349,9 +351,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
-        self._transcript_partial_topic = "transcription.partial"
+        self._transcript_segment_topic = "transcription.segment"
         self._transcript_final_topic = "transcription.complete"
         self._transcription_buffers: dict[CallId, list[AudioChunkEvent]] = {}
+        self._transcription_raw_buffers: dict[CallId, list[AudioChunkEvent]] = {}
         logger.debug("BroadcastifyClient initialised")
 
     def _create_transcription_backend(self) -> TranscriptionBackend:
@@ -673,13 +676,16 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 )
             )
 
-    async def _dispatch_audio_chunks(self, handle: ProducerHandle) -> None:
+    async def _dispatch_audio_chunks(self, handle: ProducerHandle) -> None:  # noqa: PLR0915
         assert handle.audio_queue is not None
         queue = handle.audio_queue
         try:
             while True:
                 chunk = await queue.get()
                 try:
+                    # Buffer raw chunk for segmentation/finalization
+                    raw_list = self._transcription_raw_buffers.setdefault(chunk.call_id, [])
+                    raw_list.append(chunk)
                     # Phase 1 pre-processing: band-limit + tail trim (if enabled)
                     if self._preprocessor is not None:
                         try:
@@ -692,21 +698,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                             )
                     await self._event_bus.publish(self._audio_topic, chunk)
                     await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
-                    # Fan-out to transcription pipeline when enabled
-                    if (
-                        self._transcription_pipeline is not None
-                        and self._transcription_config.emit_partial_results
-                    ):
-
-                        async def _yield_one(c: AudioChunkEvent) -> AsyncIterator[AudioChunkEvent]:
-                            yield c
-
-                        async for partial in self._transcription_pipeline.transcribe_stream(
-                            _yield_one(chunk)
-                        ):
-                            await self._event_bus.publish(self._transcript_partial_topic, partial)
-
-                    # Buffer chunks and publish final transcript when finished
+                    # Buffer chunks and publish per-segment + final transcript when finished
                     if self._transcription_pipeline is not None:
                         buf = self._transcription_buffers.setdefault(chunk.call_id, [])
                         buf.append(chunk)
@@ -717,21 +709,75 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                             assert pipeline is not None
 
                             async def _finalize(call: CallId, p: TranscriptionPipeline) -> None:
-                                chunks = self._transcription_buffers.pop(call, [])
+                                _ = self._transcription_buffers.pop(call, [])
+                                raws = self._transcription_raw_buffers.pop(call, [])
 
-                                async def _iter() -> AsyncIterator[AudioChunkEvent]:
-                                    for item in chunks:
-                                        yield item
+                                # Concatenate raw bytes (typically single chunk today)
+                                raw_bytes = b"".join(part.payload for part in raws)
+                                if not raw_bytes:
+                                    return
 
+                                # Segment using preprocessor (band-limit already applied in method)
+                                pre = self._preprocessor
+                                assert pre is not None
                                 try:
-                                    result = await p.transcribe_final(_iter())
-                                    await self._event_bus.publish(
-                                        self._transcript_final_topic, result
-                                    )
-                                except TranscriptionError as exc:
+                                    segments = pre.segment_call(raw_bytes)
+                                except AudioPreprocessError as exc:
                                     logger.error(
-                                        "Final transcription failed for call %s: %s", call, exc
+                                        "Segmentation failed for call %s: %s", call, exc
                                     )
+                                    return
+                                texts: list[str] = []
+
+                                async def _iter_one(
+                                    payload: bytes, start: float, end: float
+                                ) -> AsyncIterator[AudioChunkEvent]:
+                                    yield AudioChunkEvent(
+                                        call_id=call,
+                                        sequence=0,
+                                        start_offset=start,
+                                        end_offset=end,
+                                        payload=payload,
+                                        content_type="audio/wav",
+                                        finished=True,
+                                    )
+
+                                for idx, seg in enumerate(segments):
+                                    try:
+                                        result = await p.transcribe_final(
+                                            _iter_one(seg.payload, seg.start_time, seg.end_time)
+                                        )
+                                        texts.append(result.text.strip())
+                                        # Emit per-segment event
+                                        await self._event_bus.publish(
+                                            self._transcript_segment_topic,
+                                            TranscriptionSegment(
+                                                call_id=call,
+                                                segment_index=idx,
+                                                start_time=seg.start_time,
+                                                end_time=seg.end_time,
+                                                text=result.text,
+                                                confidence=None,
+                                            ),
+                                        )
+                                    except TranscriptionError as exc:
+                                        logger.error(
+                                            "Segment transcription failed for call %s: %s",
+                                            call,
+                                            exc,
+                                        )
+                                # Emit final as concatenation
+                                final_text = " ".join(t for t in texts if t)
+                                await self._event_bus.publish(
+                                    self._transcript_final_topic,
+                                    TranscriptionResult(
+                                        call_id=call,
+                                        text=final_text,
+                                        language=self._transcription_config.language or "",
+                                        average_logprob=None,
+                                        segments=(),
+                                    ),
+                                )
                                 # Unexpected errors propagate and will be handled by task context.
 
                             finalize_task = asyncio.create_task(_finalize(call_id, pipeline))

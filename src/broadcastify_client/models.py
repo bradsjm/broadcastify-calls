@@ -188,11 +188,11 @@ class AudioChunkEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class TranscriptionPartial:
-    """Represents an intermediate transcription update for a call."""
+class TranscriptionSegment:
+    """Represents a per-segment transcription for a call."""
 
     call_id: CallId
-    chunk_index: int
+    segment_index: int
     start_time: float
     end_time: float
     text: str
@@ -207,7 +207,7 @@ class TranscriptionResult:
     text: str
     language: str
     average_logprob: float | None
-    segments: Sequence[TranscriptionPartial]
+    segments: Sequence[TranscriptionSegment]
 
 
 @dataclass(frozen=True, slots=True)

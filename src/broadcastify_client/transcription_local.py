@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionPartial, TranscriptionResult
+from .models import AudioChunkEvent, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -46,55 +46,7 @@ class LocalWhisperBackend:
         self._load_lock = asyncio.Lock()
         self._model_lock = asyncio.Lock()
 
-    async def stream_transcription(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
-    ) -> AsyncIterator[TranscriptionPartial]:
-        """Yield partial transcriptions for chunks received from *audio_stream*."""
-        buffer = io.BytesIO()
-        has_buffer = False
-        start_time = 0.0
-        end_time = 0.0
-        chunk_index = 0
-
-        async for chunk in audio_stream:
-            if not has_buffer:
-                start_time = chunk.start_offset
-                has_buffer = True
-            end_time = chunk.end_offset
-            buffer.write(chunk.payload)
-            duration = end_time - start_time
-            should_flush = duration >= float(self._config.chunk_seconds) or chunk.finished
-            if not should_flush:
-                continue
-
-            payload = buffer.getvalue()
-            buffer = io.BytesIO()
-            has_buffer = False
-            duration = end_time - start_time
-            if duration < float(self._config.min_batch_seconds) or len(payload) < int(
-                self._config.min_batch_bytes
-            ):
-                logger.debug(
-                    "Skipping local transcription batch: duration=%.3fs bytes=%d below thresholds",
-                    duration,
-                    len(payload),
-                )
-                continue
-            try:
-                text = await self._transcribe_bytes(payload)
-            except TranscriptionError as exc:
-                logger.warning("Local transcription batch failed (non-fatal): %s", exc)
-                text = ""
-            if text:
-                yield TranscriptionPartial(
-                    call_id=chunk.call_id,
-                    chunk_index=chunk_index,
-                    start_time=start_time,
-                    end_time=end_time,
-                    text=text,
-                    confidence=None,
-                )
-                chunk_index += 1
+    # streaming partials removed
 
     async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
         """Return a final transcription result for the entirety of *audio_stream*."""

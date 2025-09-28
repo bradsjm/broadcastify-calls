@@ -7,20 +7,14 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionPartial, TranscriptionResult
+from .models import AudioChunkEvent, TranscriptionResult
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 logger = logging.getLogger(__name__)
 
 
 class TranscriptionBackend(Protocol):
-    """Protocol implemented by transcription service integrations."""
-
-    def stream_transcription(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
-    ) -> AsyncIterator[TranscriptionPartial]:  # pragma: no cover - protocol
-        """Yield partial transcriptions for the provided audio stream."""
-        ...
+    """Protocol implemented by transcription service integrations (final-only)."""
 
     async def finalize(
         self, audio_stream: AsyncIterator[AudioChunkEvent]
@@ -30,7 +24,7 @@ class TranscriptionBackend(Protocol):
 
 
 class TranscriptionPipeline:
-    """Coordinates transcription of audio chunks using a backend provider."""
+    """Coordinates transcription using a backend provider (final-only)."""
 
     def __init__(
         self,
@@ -41,22 +35,6 @@ class TranscriptionPipeline:
         """Initialise the pipeline with a transcription *backend*."""
         self._backend = backend
         self._telemetry = telemetry or NullTelemetrySink()
-
-    async def transcribe_stream(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
-    ) -> AsyncIterator[TranscriptionPartial]:
-        """Yield transcription partials for *audio_stream*."""
-        try:
-            logger.debug("Starting streaming transcription")
-            partial_stream = self._backend.stream_transcription(audio_stream)
-            async for partial in partial_stream:
-                yield partial
-        except TranscriptionError as exc:
-            logger.error("Streaming transcription failed: %s", exc)
-            raise
-        except Exception as exc:  # pragma: no cover - defensive path
-            logger.error("Streaming transcription failed: %s", exc)
-            raise TranscriptionError(str(exc)) from exc
 
     async def transcribe_final(
         self, audio_stream: AsyncIterator[AudioChunkEvent]

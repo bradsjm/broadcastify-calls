@@ -167,10 +167,6 @@ class TranscriptionConfig(BaseModel):
         ge=1,
         description="Maximum concurrent transcription requests to the provider",
     )
-    emit_partial_results: bool = Field(
-        default=True,
-        description="Whether to emit partial transcripts while audio is streaming",
-    )
     min_batch_seconds: PositiveFloat = Field(
         default=0.5,
         description=(

@@ -9,7 +9,6 @@ import os
 import signal
 import sys
 import traceback
-from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,8 +29,7 @@ from .models import (
     CallMetadata,
     LiveCallEnvelope,
     SourceDescriptor,
-    TranscriptionPartial,
-    TranscriptionResult,
+    TranscriptionSegment,
 )
 
 LOG_LEVELS: Final[dict[str, int]] = {
@@ -366,74 +364,17 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     return _printer
 
 
-class _TranscriptGate:
-    """Gate printing of transcripts to avoid repeating partial and final outputs.
-
-    Policy: if any partials were printed for a call_id, suppress the final; otherwise,
-    print the final. A small LRU prevents unbounded growth for long-running sessions.
-    """
-
-    __slots__ = ("_capacity", "_lock", "_seen_partials")
-
-    def __init__(self, capacity: int = 2048) -> None:
-        self._seen_partials: OrderedDict[str, None] = OrderedDict()
-        self._lock = asyncio.Lock()
-        self._capacity = capacity
-
-    async def mark_partial(self, call_id: str) -> None:
-        async with self._lock:
-            # Move-to-end semantics for LRU behavior
-            self._seen_partials.pop(call_id, None)
-            self._seen_partials[call_id] = None
-            # Trim to capacity
-            while len(self._seen_partials) > self._capacity:
-                self._seen_partials.popitem(last=False)
-
-    async def should_print_final(self, call_id: str) -> bool:
-        async with self._lock:
-            if call_id in self._seen_partials:
-                # Consume and suppress the final to avoid repetition
-                self._seen_partials.pop(call_id, None)
-                return False
-            # No partials were printed; allow the final and ensure we don't keep state
-            self._seen_partials.pop(call_id, None)
-            return True
-
-
-def _create_transcript_partial_printer(gate: _TranscriptGate) -> ConsumerCallback:
-    """Return a coroutine callback that prints partial transcription updates."""
+def _create_transcript_segment_printer() -> ConsumerCallback:
+    """Return a coroutine callback that prints per-segment transcription text."""
     print_lock = asyncio.Lock()
 
     async def _printer(event: object) -> None:
-        if not isinstance(event, TranscriptionPartial):
+        if not isinstance(event, TranscriptionSegment):
             return
         text = event.text.strip()
         if not text:
             return
-        await gate.mark_partial(event.call_id)
         line = f"  -> {text}"
-        async with print_lock:
-            print(line, flush=True)
-
-    return _printer
-
-
-def _create_transcript_final_printer(gate: _TranscriptGate) -> ConsumerCallback:
-    """Return a coroutine callback that prints the final transcription result.
-
-    Final output is suppressed if partials for the call were already printed.
-    """
-    print_lock = asyncio.Lock()
-
-    async def _printer(event: object) -> None:
-        if not isinstance(event, TranscriptionResult):
-            return
-        text = event.text.strip()
-        if not text:
-            return
-        if not await gate.should_print_final(event.call_id):
-            return
-        line = f"  --> {text}"
         async with print_lock:
             print(line, flush=True)
 
@@ -579,15 +520,21 @@ async def _register_live_consumers(
             await client.register_consumer(topic, printer)
 
     if transcription_cfg.enabled:
-        gate = _TranscriptGate()
         await client.register_consumer(
-            "transcription.partial",
-            _create_transcript_partial_printer(gate),
+            "transcription.segment",
+            _create_transcript_segment_printer(),
         )
-        await client.register_consumer(
-            "transcription.complete",
-            _create_transcript_final_printer(gate),
-        )
+        # Final concatenated transcript printer (simple one-line output)
+        async def _final_printer(event: object) -> None:
+            # Final result concatenated across segments; avoid top-level import
+            if event.__class__.__name__ != "TranscriptionResult":
+                return
+            text = str(getattr(event, "text", "")).strip()
+            if not text:
+                return
+            print(f"  --> {text}", flush=True)
+
+        await client.register_consumer("transcription.complete", _final_printer)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

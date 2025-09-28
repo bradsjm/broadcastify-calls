@@ -35,8 +35,8 @@ from .models import (
     SystemSummary,
     TalkgroupSummary,
     TimeWindow,
-    TranscriptionPartial,
     TranscriptionResult,
+    TranscriptionSegment,
 )
 
 __all__ = [
@@ -68,7 +68,7 @@ __all__ = [
     "TalkgroupSummary",
     "TimeWindow",
     "TranscriptionConfig",
-    "TranscriptionPartial",
     "TranscriptionResult",
+    "TranscriptionSegment",
     "load_credentials_from_environment",
 ]

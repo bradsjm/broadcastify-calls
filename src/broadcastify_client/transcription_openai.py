@@ -7,7 +7,6 @@ converts ``AudioChunkEvent`` streams into Whisper requests using multipart form 
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import io
 import logging
@@ -16,7 +15,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionPartial, TranscriptionResult
+from .models import AudioChunkEvent, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,60 +78,7 @@ class OpenAIWhisperBackend:
             # Best-effort guard; in practice AsyncOpenAI conforms.
             raise TranscriptionError("OpenAI client does not expose expected API surface")
 
-    async def stream_transcription(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
-    ) -> AsyncIterator[TranscriptionPartial]:
-        """Yield partial transcriptions for the audio stream."""
-        buffer = io.BytesIO()
-        has_buffer = False
-        start_time: float = 0.0
-        end_time: float = 0.0
-        chunk_index = 0
-        semaphore = asyncio.Semaphore(self._config.max_concurrency)
-        last_mime: str | None = None
-
-        async def flush_batch(data: bytes, mime: str | None) -> str:
-            async with semaphore:
-                return await self._transcribe_bytes(data, content_type=mime)
-
-        async for chunk in audio_stream:
-            if not has_buffer:
-                start_time = chunk.start_offset
-                has_buffer = True
-            end_time = chunk.end_offset
-            buffer.write(chunk.payload)
-            last_mime = chunk.content_type or last_mime
-            duration = end_time - start_time
-            should_flush = duration >= float(self._config.chunk_seconds) or chunk.finished
-            if should_flush:
-                data = buffer.getvalue()
-                buffer = io.BytesIO()  # reset
-                has_buffer = False
-                duration = end_time - start_time
-                if duration < float(self._config.min_batch_seconds) or len(data) < int(
-                    self._config.min_batch_bytes
-                ):
-                    logger.debug(
-                        "Skipping transcription batch: duration=%.3fs bytes=%d below thresholds",
-                        duration,
-                        len(data),
-                    )
-                else:
-                    try:
-                        text = await flush_batch(data, last_mime)
-                    except TranscriptionError as exc:
-                        logger.warning("Transcription batch failed (non-fatal): %s", exc)
-                        text = ""
-                    if text:
-                        yield TranscriptionPartial(
-                            call_id=chunk.call_id,
-                            chunk_index=chunk_index,
-                            start_time=start_time,
-                            end_time=end_time,
-                            text=text,
-                            confidence=None,
-                        )
-                        chunk_index += 1
+    # streaming partials removed
 
     async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
         """Return a single transcription result for the entire audio stream."""
