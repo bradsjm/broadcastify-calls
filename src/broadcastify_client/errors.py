@@ -30,11 +30,11 @@ class LiveSessionError(BroadcastifyError):
 
 
 class AudioDownloadError(BroadcastifyError):
-    """Raised when audio chunks cannot be retrieved for a call event."""
+    """Raised when call audio payloads cannot be retrieved."""
 
 
 class TranscriptionError(BroadcastifyError):
-    """Raised when transcription of audio chunks fails."""
+    """Raised when transcription of call audio fails."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionResult
+from .models import AudioPayloadEvent, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +48,13 @@ class LocalWhisperBackend:
 
     # streaming partials removed
 
-    async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
+    async def finalize(self, audio_stream: AsyncIterator[AudioPayloadEvent]) -> TranscriptionResult:
         """Return a final transcription result for the entirety of *audio_stream*."""
         buffer = io.BytesIO()
         call_id: str | None = None
-        async for chunk in audio_stream:
-            call_id = chunk.call_id
-            buffer.write(chunk.payload)
+        async for event in audio_stream:
+            call_id = event.call_id
+            buffer.write(event.payload)
         if call_id is None:
             return TranscriptionResult(
                 call_id="",

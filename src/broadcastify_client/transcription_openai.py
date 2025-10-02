@@ -2,7 +2,7 @@
 
 This backend targets the OpenAI transcription API surface and compatible providers
 exposing the same interface. It implements the TranscriptionBackend protocol and
-converts ``AudioChunkEvent`` streams into Whisper requests using multipart form data.
+converts ``AudioPayloadEvent`` streams into Whisper requests using multipart form data.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from .config import TranscriptionConfig
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionResult
+from .models import AudioPayloadEvent, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +80,15 @@ class OpenAIWhisperBackend:
 
     # streaming partials removed
 
-    async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> TranscriptionResult:
+    async def finalize(self, audio_stream: AsyncIterator[AudioPayloadEvent]) -> TranscriptionResult:
         """Return a single transcription result for the entire audio stream."""
         buffer = io.BytesIO()
         call_id: str | None = None
         last_mime: str | None = None
-        async for chunk in audio_stream:
-            call_id = chunk.call_id
-            buffer.write(chunk.payload)
-            last_mime = chunk.content_type or last_mime
+        async for event in audio_stream:
+            call_id = event.call_id
+            buffer.write(event.payload)
+            last_mime = event.content_type or last_mime
         if call_id is None:
             # With no audio events, preserve API semantics by returning an empty result.
             return TranscriptionResult(
@@ -110,11 +110,7 @@ class OpenAIWhisperBackend:
             )
             text = ""
         else:
-            try:
-                text = await self._transcribe_bytes(data, content_type=last_mime)
-            except TranscriptionError as exc:
-                logger.warning("Final transcription failed (non-fatal): %s", exc)
-                text = ""
+            text = await self._transcribe_bytes(data, content_type=last_mime)
         # For now, no segment-level partials are returned from finalize.
         return TranscriptionResult(
             call_id=call_id,
@@ -127,35 +123,23 @@ class OpenAIWhisperBackend:
     async def _transcribe_bytes(self, data: bytes, *, content_type: str | None = None) -> str:
         """Call the provider transcription endpoint with the given bytes and return text.
 
-        Respects ``content_type`` when provided to set the filename and MIME type for
-        the multipart upload. Falls back to ``audio/mpeg`` if not specified.
+        Uploads the aggregated audio as an AAC ``.m4a`` file using the ``audio/mp4``
+        content type expected by the provider.
         """
-        mime = (content_type or "").lower() or "audio/mpeg"
-
-        def _guess_extension(ct: str) -> str:
-            if ct in {"audio/wav", "audio/x-wav"}:
-                return ".wav"
-            if ct in {"audio/mpeg", "audio/mp3"}:
-                return ".mp3"
-            if ct in {"audio/mp4", "audio/aac", "audio/m4a"}:
-                return ".m4a"
-            if ct == "audio/flac":
-                return ".flac"
-            return ".bin"
-
-        ext = _guess_extension(mime)
-        filename = f"audio{ext}"
+        _ = content_type  # Retained for signature compatibility; currently unused.
+        filename = "audio.m4a"
 
         # Use the OpenAI audio transcriptions endpoint via the files API.
         response = await self._client.audio.transcriptions.create(  # type: ignore[reportUnknownMemberType]
             model=self._config.model,
-            file=(filename, io.BytesIO(data), mime),
+            file=(filename, io.BytesIO(data), "audio/mp4"),
             language=self._config.language,
         )
 
-        response_obj: object = response
-        text: str | None = getattr(response_obj, "text", None)
-        if not text:
-            logger.warning("Empty transcription response from provider; treating as empty text")
-            return ""
-        return text
+        text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            raise TranscriptionError("Transcription provider response missing text")
+        cleaned = text.strip()
+        if not cleaned:
+            raise TranscriptionError("Transcription provider returned empty text")
+        return cleaned

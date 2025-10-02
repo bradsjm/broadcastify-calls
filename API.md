@@ -29,8 +29,8 @@ broadcastify_client/
 ├─ models.py            # Dataclasses / TypedDicts (Call, Events, Errors, Transcription artifacts)
 ├─ archives.py          # Async archive retrieval with pluggable cache provider
 ├─ live_producer.py     # Async LiveCall producer (poll -> event queue)
-├─ audio_consumer.py    # Async consumer downloading audio & emitting bytes/chunks
-├─ transcription.py     # Async Whisper pipeline consuming audio chunks
+├─ audio_consumer.py    # Async consumer downloading audio and emitting payload events
+├─ transcription.py     # Async Whisper pipeline consuming audio payload events
 ├─ eventbus.py          # Async event dispatcher (Queues, Topics, back-pressure controls)
 ├─ cache.py             # Cache provider contracts + default async filesystem implementation
 ├─ telemetry.py         # Structured logging and metrics instrumentation
@@ -39,8 +39,8 @@ broadcastify_client/
 
 - **Event Flow:**
   1. `LiveCallProducer` polls Broadcastify on an interval, pushes `CallEvent` objects into an `asyncio.Queue`.
-  2. `AudioConsumer` listens on the queue, streams audio chunks, and emits `AudioChunkEvent` for downstream consumers.
-  3. Optional `TranscriptionPipeline` performs final-only transcription. The client preprocesses audio (band-limit + tail trim), segments calls by silence (P25 half‑duplex), transcribes per segment, emits segment events, and publishes a concatenated final.
+  2. `AudioConsumer` listens on the queue, downloads call audio assets, and emits `AudioPayloadEvent` instances for downstream consumers.
+  3. Optional `TranscriptionPipeline` performs final-only transcription. The client concatenates each call’s raw audio, uploads it once to the provider, and publishes a single final transcript.
   4. Applications register additional consumers (analytics, persistence) via `EventBus.subscribe(topic, callback)`.
 - Dependency injection allows swapping HTTP client (e.g., `aiohttp`, `httpx.AsyncClient`), cache backend, and transcription provider.
 
@@ -55,7 +55,7 @@ broadcastify_client/
 - Respect rate limits using the `rate_limit_per_minute` field in `LiveProducerConfig`; coordinate shard-level budgets via a shared token bucket.
 - Cache Archive responses aggressively and honor future `ETag`/`Last-Modified` headers when Broadcastify provides them, falling back to current caching heuristics otherwise.
 - Propagate retry-after semantics: when receiving HTTP 429 or 503 with `Retry-After`, back off all producers before resuming.
-- For audio downloads, stream with chunked reads (default 8 KiB) while reusing the pooled client; pause downloads when downstream consumers lag to reduce unnecessary IO.
+- For audio downloads, stream with buffered reads (default 8 KiB) while reusing the pooled client; pause downloads when downstream consumers lag to reduce unnecessary IO.
 
 ### 3.1 Authentication Lifecycle
 
@@ -171,11 +171,23 @@ class LiveCallEnvelope:
 
 ### 3.4 Audio Pipeline (Consumer)
 
-- `AudioConsumer` subscribes to `LiveCallEnvelope` queue and downloads the call audio asset once from Broadcastify’s calls CDN. The provider typically serves AAC in MP4/M4A (extension `m4a`).
-- An `AudioChunkEvent` (usually a single final chunk) is emitted with the response body and the server’s `Content-Type` header.
-- The client republishes chunks on `calls.audio` and per-call channels `calls.audio.{callId}` for downstream consumers (transcription, storage, analytics).
+- `AudioConsumer` subscribes to the `LiveCallEnvelope` queue and downloads each call audio asset once from Broadcastify’s calls CDN. The provider typically serves AAC in MP4/M4A (extension `m4a`).
+- An `AudioPayloadEvent` (usually a single final payload) is emitted with the response body and the server’s `Content-Type` header.
+- Chunks are published on `calls.audio.raw` and per-call channels `calls.audio.raw.{callId}` for downstream consumers (transcription, storage, analytics). No additional preprocessing or segmentation is performed in the current pipeline.
 
-### 3.5 Transcription (final-only with segmentation)
+#### Event Topics & Ordering
+
+Each call produces a deterministic sequence of bus publications so downstream services can reason about lifecycle stages. The table below lists the high-level order; per-call scoped topics (`*.{callId}`) fire immediately after their corresponding global topic.
+
+| Order | Topic | Payload Type | Description |
+| ----- | ----- | ------------ | ----------- |
+| 1 | `calls.live` | `LiveCallEnvelope` | Dispatches every live call as soon as metadata is polled. A shard-specific topic `calls.live.{systemId}.{talkgroupId}` is emitted in the same tick. |
+| 2 | `calls.audio.raw` | `AudioPayloadEvent` | Raw bytes downloaded from Broadcastify (typically AAC/M4A). Per-call scoped topic: `calls.audio.raw.{callId}`. |
+| 3 | `transcription.complete` | `TranscriptionResult` | Optional final transcript emitted when transcription is enabled. |
+
+When transcription is disabled, only the `calls.live` and `calls.audio.raw` topics fire. All events respect per-topic ordering guarantees enforced by the async event bus.
+
+### 3.5 Transcription (final-only)
 
 #### Configuration (high level)
 
@@ -189,42 +201,33 @@ class TranscriptionConfig:
     api_key: Optional[str] = None
     language: Optional[str] = "en"
     max_concurrency: int = 2
-    # Note: chunk-based streaming and partials are removed.
+    # Note: streaming partials are removed.
 ```
 
-Preprocessing is enabled by default when transcription is enabled. The audio is band‑limited (250–3400 Hz) and trailing silence is trimmed. Calls are segmented by silence (e.g., ≥200 ms below −35 dB) to approximate speaker turns in half‑duplex P25.
+Raw AAC payloads are uploaded without intermediate preprocessing, silence trimming, or segmentation.
 
 #### Workflow
 
-1. On call completion, the client concatenates raw bytes and applies preprocessing and silence-based segmentation.
-2. Each segment (WAV/PCM16, 16 kHz mono) is sent as a single finalize request to the provider.
-3. The client publishes per-segment events and then a concatenated final.
+1. On call completion, the client concatenates raw AAC bytes emitted by the audio consumer.
+2. The entire call audio is uploaded as an `.m4a` (`audio/mp4`) file to the configured OpenAI-compatible endpoint.
+3. The client reads the provider response from the `.text` field and publishes a final transcript.
+4. Any provider failure (missing text, empty transcript, HTTP error) raises `TranscriptionError` and is logged without suppression.
 
 #### Topics
 
-- `transcription.segment` — per‑segment text as it completes.
-- `transcription.complete` — final concatenated transcript for the call.
+- `transcription.complete` — final transcript for the call (emitted once when enabled).
 
 #### Models
 
 ```python
 @dataclass(frozen=True)
-class AudioChunkEvent:
+class AudioPayloadEvent:
     call_id: str
     sequence: int
     start_offset: float
     end_offset: float
     payload: bytes
-    content_type: str  # e.g., "audio/mp4" (m4a) or "audio/wav" after preprocessing
-
-@dataclass(frozen=True)
-class TranscriptionSegment:
-    call_id: str
-    segment_index: int
-    start_time: float
-    end_time: float
-    text: str
-    confidence: Optional[float]
+    content_type: str  # e.g., "audio/mp4" (m4a)
 
 @dataclass(frozen=True)
 class TranscriptionResult:
@@ -232,18 +235,21 @@ class TranscriptionResult:
     text: str
     language: str
     average_logprob: Optional[float]
-    segments: Sequence[TranscriptionSegment]
+    segments: Sequence[str]
 ```
+The current OpenAI backend does not provide segment-level metadata; the
+``segments`` field remains for forward compatibility and defaults to an empty
+tuple.
 
 #### Error Handling
 
-- Provider failures → `TranscriptionError` recorded and logged concisely; the client proceeds with remaining segments and still emits a final (concatenation of successful segments).
+- Provider failures (missing text, empty transcript, HTTP error) raise `TranscriptionError`; callers can decide whether to retry or log the failure. No fallback transcript is emitted when the provider rejects the audio.
 - Network errors bubble as `TransportError`; catastrophic failures trigger backoff to avoid hammering the provider.
 
 ## 4. Data Models (Summary)
 
 - `Call`: typed mapping of Broadcastify call payload including extended fields (`call_freq`, `call-ttl`, `metadata`, etc.), storing unknown keys in immutable `raw` mapping.
-- `SessionToken`, `TimeWindow`, `ArchiveResult`, `LiveCallEnvelope`, `AudioChunkEvent`, `TranscriptionPartial`, `TranscriptionResult` as defined above.
+- `SessionToken`, `TimeWindow`, `ArchiveResult`, `LiveCallEnvelope`, `AudioPayloadEvent`, `TranscriptionResult` as defined above.
 - Enumerations for error kinds and provider identifiers.
 
 ## 5. Public Facade (Async-First Interface)
@@ -325,7 +331,7 @@ To accelerate implementation while preserving the specification's type-safety an
 - Browser-mimicking headers for all Broadcastify requests ✅
 - Archived call parameters and cache strategy ✅
 - Live call poll schema & async producer behavior ✅
-- Audio streaming consumer & chunking ✅
+- Audio streaming consumer ✅
 - Remote Whisper transcription pipeline ✅
 - Async interface definitions & event bus ✅
 - Telemetry, testing, security considerations ✅

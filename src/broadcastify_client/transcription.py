@@ -1,4 +1,4 @@
-"""Transcription pipeline consuming audio chunks."""
+"""Transcription pipeline consuming call audio events."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from .errors import TranscriptionError
-from .models import AudioChunkEvent, TranscriptionResult
+from .models import AudioPayloadEvent, TranscriptionResult
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ class TranscriptionBackend(Protocol):
     """Protocol implemented by transcription service integrations (final-only)."""
 
     async def finalize(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
+        self, audio_stream: AsyncIterator[AudioPayloadEvent]
     ) -> TranscriptionResult:  # pragma: no cover - protocol
         """Return the final transcription result for the provided audio stream."""
         ...
@@ -37,9 +37,13 @@ class TranscriptionPipeline:
         self._telemetry = telemetry or NullTelemetrySink()
 
     async def transcribe_final(
-        self, audio_stream: AsyncIterator[AudioChunkEvent]
+        self, audio_stream: AsyncIterator[AudioPayloadEvent]
     ) -> TranscriptionResult:
-        """Return the final transcription result for *audio_stream*."""
+        """Return the final transcription result for *audio_stream*.
+
+        The iterator typically yields a single :class:`AudioPayloadEvent` containing
+        the entire call audio payload.
+        """
         try:
             logger.debug("Starting final transcription")
             return await self._backend.finalize(audio_stream)

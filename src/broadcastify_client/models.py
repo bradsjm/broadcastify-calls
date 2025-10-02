@@ -175,8 +175,12 @@ class ArchiveResult:
 
 
 @dataclass(frozen=True, slots=True)
-class AudioChunkEvent:
-    """Event carrying an audio chunk for downstream consumers."""
+class AudioPayloadEvent:
+    """Event carrying the full audio payload for a call.
+
+    The downloader currently emits a single event per call containing the entire
+    AAC asset retrieved from Broadcastify.
+    """
 
     call_id: CallId
     sequence: int
@@ -188,18 +192,6 @@ class AudioChunkEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class TranscriptionSegment:
-    """Represents a per-segment transcription for a call."""
-
-    call_id: CallId
-    segment_index: int
-    start_time: float
-    end_time: float
-    text: str
-    confidence: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class TranscriptionResult:
     """Represents the completed transcription for a call."""
 
@@ -207,7 +199,7 @@ class TranscriptionResult:
     text: str
     language: str
     average_logprob: float | None
-    segments: Sequence[TranscriptionSegment]
+    segments: Sequence[str]
 
 
 @dataclass(frozen=True, slots=True)

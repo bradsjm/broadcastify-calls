@@ -14,7 +14,7 @@ from .audio_consumer import AudioDownloader
 from .auth import Authenticator
 from .errors import AudioDownloadError
 from .http import AsyncHttpClientProtocol
-from .models import AudioChunkEvent, LiveCallEnvelope
+from .models import AudioPayloadEvent, LiveCallEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +45,11 @@ class HttpAudioDownloader(AudioDownloader):
         self._http = http
         self._auth = authenticator
 
-    async def fetch_audio(self, call: LiveCallEnvelope) -> AsyncIterator[AudioChunkEvent]:
-        """Return an async iterator yielding the audio payload as a single chunk.
+    async def fetch_audio(self, call: LiveCallEnvelope) -> AsyncIterator[AudioPayloadEvent]:
+        """Return an async iterator yielding the audio payload as a single event.
 
-        Current implementation downloads the entire asset in one request, then
-        returns an async generator that yields the resulting chunk. This matches the
+        The current implementation downloads the entire asset in one request and
+        returns an async generator that yields that payload. This matches the
         ``AudioDownloader`` protocol, which is awaited by the consumer to obtain an
         ``AsyncIterator``.
         """
@@ -84,9 +84,9 @@ class HttpAudioDownloader(AudioDownloader):
         content_type = response.headers.get("content-type", "audio/mpeg")
         data = response.content
 
-        async def _one() -> AsyncIterator[AudioChunkEvent]:
-            # Emit a single chunk; offsets are 0 for lack of precise duration metadata.
-            yield AudioChunkEvent(
+        async def _one() -> AsyncIterator[AudioPayloadEvent]:
+            # Emit a single payload; offsets are 0 for lack of precise duration metadata.
+            yield AudioPayloadEvent(
                 call_id=call.call.call_id,
                 sequence=0,
                 start_offset=0.0,

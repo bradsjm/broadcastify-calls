@@ -15,10 +15,8 @@ from uuid import uuid4
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
 from .audio_downloader_http import HttpAudioDownloader
-from .audio_preprocess import AudioPreprocessError, AudioPreprocessor
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import (
-    AudioPreprocessConfig,
     Credentials,
     HttpClientConfig,
     LiveProducerConfig,
@@ -31,7 +29,7 @@ from .live_producer import CallPoller, LiveCallProducer
 from .metadata import parse_call_metadata
 from .models import (
     ArchiveResult,
-    AudioChunkEvent,
+    AudioPayloadEvent,
     Call,
     CallId,
     LiveCallEnvelope,
@@ -46,7 +44,6 @@ from .models import (
     SystemSummary,
     TalkgroupSummary,
     TranscriptionResult,
-    TranscriptionSegment,
 )
 from .schemas import LiveCallEntry, LiveCallsResponse
 from .telemetry import (
@@ -285,7 +282,7 @@ class ProducerHandle:
     task: asyncio.Task[None] | None = None
     dispatch_task: asyncio.Task[None] | None = None
     audio_consumer: AudioConsumer | None = None
-    audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
+    audio_queue: asyncio.Queue[AudioPayloadEvent] | None = None
     audio_dispatch_task: asyncio.Task[None] | None = None
     audio_tasks: set[asyncio.Task[None]] = field(default_factory=_create_task_set)
 
@@ -305,7 +302,6 @@ class BroadcastifyClientDependencies:
     call_poller_factory: CallPollerFactory | None = None
     audio_consumer_factory: Callable[[], AudioConsumer] | None = None
     transcription_config: TranscriptionConfig | None = None
-    preprocess_config: AudioPreprocessConfig | None = None
     playlist_catalog: PlaylistCatalog | None = None
     discovery_client: DiscoveryService | None = None
 
@@ -336,26 +332,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._discovery_client = deps.discovery_client
         self._transcription_config = deps.transcription_config or TranscriptionConfig()
         self._transcription_pipeline: TranscriptionPipeline | None = None
-        if deps.preprocess_config is not None:
-            self._preprocess_config = deps.preprocess_config
-        else:
-            # Enable preprocessing by default when transcription is enabled
-            self._preprocess_config = AudioPreprocessConfig(
-                enabled=bool(self._transcription_config.enabled)
-            )
-        self._preprocessor: AudioPreprocessor | None = (
-            AudioPreprocessor(self._preprocess_config) if self._preprocess_config.enabled else None
-        )
         self._producer_handles: dict[str, ProducerHandle] = {}
         self._handles_lock = asyncio.Lock()
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
         self._audio_raw_topic = "calls.audio.raw"
-        self._transcript_segment_topic = "transcription.segment"
         self._transcript_final_topic = "transcription.complete"
-        self._transcription_buffers: dict[CallId, list[AudioChunkEvent]] = {}
-        self._transcription_raw_buffers: dict[CallId, list[AudioChunkEvent]] = {}
         logger.debug("BroadcastifyClient initialised")
 
     def _create_transcription_backend(self) -> TranscriptionBackend:
@@ -364,7 +347,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             return LocalWhisperBackend(config)
         if config.provider in {"openai", "external"}:
             return OpenAIWhisperBackend(config)
-        raise NotImplementedError(f"Transcription provider '{config.provider}' is not supported")
+        raise ValueError(f"Unsupported transcription provider '{config.provider}'")
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate against Broadcastify and return a validated session token."""
@@ -484,13 +467,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     async def list_playlists(self) -> Sequence[PlaylistDescriptor]:
         """Return playlist descriptors from the configured catalog provider."""
         if self._playlist_catalog is None:
-            raise NotImplementedError("Playlist catalog integration not configured")
+            raise RuntimeError("Playlist catalog integration not configured")
         return await self._playlist_catalog.list_playlists()
 
     async def describe_playlist(self, playlist_id: PlaylistId) -> PlaylistSubscriptionState:
         """Return playlist membership and cursor information for *playlist_id*."""
         if self._playlist_catalog is None:
-            raise NotImplementedError("Playlist catalog integration not configured")
+            raise RuntimeError("Playlist catalog integration not configured")
         return await self._playlist_catalog.describe_playlist(playlist_id)
 
     async def search_playlists(
@@ -498,7 +481,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     ) -> SearchResultPage[PlaylistDescriptor]:
         """Search playlists matching *query*, returning a paginated result set."""
         if self._playlist_catalog is None:
-            raise NotImplementedError("Playlist catalog integration not configured")
+            raise RuntimeError("Playlist catalog integration not configured")
         return await self._playlist_catalog.search_playlists(query, limit=limit)
 
     async def search_systems(
@@ -506,7 +489,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     ) -> SearchResultPage[SystemSummary]:
         """Search systems matching *query*, returning at most *limit* entries."""
         if self._discovery_client is None:
-            raise NotImplementedError("Discovery integration not configured")
+            raise RuntimeError("Discovery integration not configured")
         return await self._discovery_client.search_systems(query, limit=limit)
 
     async def search_talkgroups(
@@ -514,13 +497,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
     ) -> SearchResultPage[TalkgroupSummary]:
         """Search talkgroups matching *query*, returning at most *limit* entries."""
         if self._discovery_client is None:
-            raise NotImplementedError("Discovery integration not configured")
+            raise RuntimeError("Discovery integration not configured")
         return await self._discovery_client.search_talkgroups(query, limit=limit)
 
     async def resolve_talkgroup(self, name: str, region: str) -> TalkgroupSummary | None:
         """Resolve a talkgroup by *name* and *region*, or ``None`` when no match exists."""
         if self._discovery_client is None:
-            raise NotImplementedError("Discovery integration not configured")
+            raise RuntimeError("Discovery integration not configured")
         return await self._discovery_client.resolve_talkgroup(name, region)
 
     async def _register_subscription(
@@ -550,7 +533,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             queue=queue,
         )
         audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
-        audio_queue: asyncio.Queue[AudioChunkEvent] | None = None
+        audio_queue: asyncio.Queue[AudioPayloadEvent] | None = None
         if audio_consumer is not None:
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         elif self._transcription_config.enabled:
@@ -577,7 +560,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         handle.task = asyncio.create_task(handle.producer.run())
         handle.dispatch_task = asyncio.create_task(self._dispatch_events(handle))
         if handle.audio_queue is not None and handle.audio_consumer is not None:
-            handle.audio_dispatch_task = asyncio.create_task(self._dispatch_audio_chunks(handle))
+            handle.audio_dispatch_task = asyncio.create_task(self._dispatch_audio_events(handle))
         logger.debug("Started producer tasks for %s", handle.topic)
 
     async def _stop_producer_by_id(self, handle_id: str) -> None:
@@ -677,128 +660,78 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 )
             )
 
-    async def _dispatch_audio_chunks(self, handle: ProducerHandle) -> None:  # noqa: PLR0915
+    async def _dispatch_audio_events(self, handle: ProducerHandle) -> None:
         assert handle.audio_queue is not None
         queue = handle.audio_queue
         try:
             while True:
-                chunk = await queue.get()
+                event = await queue.get()
                 try:
-                    # Buffer raw chunk for segmentation/finalization
-                    raw_list = self._transcription_raw_buffers.setdefault(chunk.call_id, [])
-                    raw_list.append(chunk)
-                    await self._event_bus.publish(self._audio_raw_topic, chunk)
+                    await self._event_bus.publish(self._audio_raw_topic, event)
                     await self._event_bus.publish(
-                        f"{self._audio_raw_topic}.{chunk.call_id}", chunk
+                        f"{self._audio_raw_topic}.{event.call_id}", event
                     )
-                    # Phase 1 pre-processing: band-limit + tail trim (if enabled)
-                    if self._preprocessor is not None:
-                        try:
-                            chunk = self._preprocessor.process_chunk(chunk)
-                        except AudioPreprocessError as exc:  # pragma: no cover - defensive path
-                            logger.warning(
-                                "Audio pre-processing failed for call %s: %s",
-                                chunk.call_id,
-                                exc,
-                            )
-                    await self._event_bus.publish(self._audio_topic, chunk)
-                    await self._event_bus.publish(f"{self._audio_topic}.{chunk.call_id}", chunk)
-                    # Buffer chunks and publish per-segment + final transcript when finished
-                    if self._transcription_pipeline is not None:
-                        buf = self._transcription_buffers.setdefault(chunk.call_id, [])
-                        buf.append(chunk)
-                        if chunk.finished:
-                            call_id: CallId = chunk.call_id
+                    await self._event_bus.publish(self._audio_topic, event)
+                    await self._event_bus.publish(
+                        f"{self._audio_topic}.{event.call_id}", event
+                    )
 
-                            pipeline = self._transcription_pipeline
-                            assert pipeline is not None
+                    if self._transcription_pipeline is not None and event.finished:
+                        pipeline = self._transcription_pipeline
 
-                            async def _finalize(call: CallId, p: TranscriptionPipeline) -> None:
-                                _ = self._transcription_buffers.pop(call, [])
-                                raws = self._transcription_raw_buffers.pop(call, [])
+                        async def _finalize(
+                            call: CallId,
+                            payload_event: AudioPayloadEvent,
+                            p: TranscriptionPipeline,
+                        ) -> None:
+                            async def _one() -> AsyncIterator[AudioPayloadEvent]:
+                                yield payload_event
 
-                                # Concatenate raw bytes (typically single chunk today)
-                                raw_bytes = b"".join(part.payload for part in raws)
-                                if not raw_bytes:
-                                    return
-
-                                # Segment using preprocessor (band-limit already applied in method)
-                                pre = self._preprocessor
-                                assert pre is not None
-                                try:
-                                    segments = pre.segment_call(raw_bytes)
-                                except AudioPreprocessError as exc:
-                                    logger.error(
-                                        "Segmentation failed for call %s: %s", call, exc
-                                    )
-                                    return
-                                texts: list[str] = []
-
-                                async def _iter_one(
-                                    payload: bytes, start: float, end: float
-                                ) -> AsyncIterator[AudioChunkEvent]:
-                                    yield AudioChunkEvent(
-                                        call_id=call,
-                                        sequence=0,
-                                        start_offset=start,
-                                        end_offset=end,
-                                        payload=payload,
-                                        content_type="audio/wav",
-                                        finished=True,
-                                    )
-
-                                for idx, seg in enumerate(segments):
-                                    try:
-                                        result = await p.transcribe_final(
-                                            _iter_one(seg.payload, seg.start_time, seg.end_time)
-                                        )
-                                        texts.append(result.text.strip())
-                                        # Emit per-segment event
-                                        await self._event_bus.publish(
-                                            self._transcript_segment_topic,
-                                            TranscriptionSegment(
-                                                call_id=call,
-                                                segment_index=idx,
-                                                start_time=seg.start_time,
-                                                end_time=seg.end_time,
-                                                text=result.text,
-                                                confidence=None,
-                                            ),
-                                        )
-                                    except TranscriptionError as exc:
-                                        logger.error(
-                                            "Segment transcription failed for call %s: %s",
-                                            call,
-                                            exc,
-                                        )
-                                # Emit final as concatenation
-                                final_text = " ".join(t for t in texts if t)
-                                await self._event_bus.publish(
-                                    self._transcript_final_topic,
-                                    TranscriptionResult(
-                                        call_id=call,
-                                        text=final_text,
-                                        language=self._transcription_config.language or "",
-                                        average_logprob=None,
-                                        segments=(),
-                                    ),
+                            try:
+                                result = await p.transcribe_final(_one())
+                            except TranscriptionError as exc:
+                                logger.error(
+                                    "Transcription failed for call %s: %s", call, exc
                                 )
-                                # Unexpected errors propagate and will be handled by task context.
+                                return
 
-                            finalize_task = asyncio.create_task(_finalize(call_id, pipeline))
+                            await self._event_bus.publish(
+                                self._transcript_final_topic,
+                                TranscriptionResult(
+                                    call_id=call,
+                                    text=result.text,
+                                    language=result.language,
+                                    average_logprob=result.average_logprob,
+                                    segments=result.segments,
+                                ),
+                            )
 
-                            def _remove(task: asyncio.Task[None]) -> None:
-                                handle.audio_tasks.discard(task)
+                        finalize_task = asyncio.create_task(
+                            _finalize(event.call_id, event, pipeline)
+                        )
 
-                            handle.audio_tasks.add(finalize_task)
-                            finalize_task.add_done_callback(_remove)
+                        def _remove(task: asyncio.Task[None]) -> None:
+                            handle.audio_tasks.discard(task)
+
+                        handle.audio_tasks.add(finalize_task)
+                        finalize_task.add_done_callback(_remove)
                 except Exception as exc:
-                    logger.exception("Failed to dispatch audio chunk for call %s", chunk.call_id)
+                    logger.exception(
+                        "Failed to dispatch audio payload for call %s", event.call_id
+                    )
+                    system_id = -1
+                    talkgroup_id = -1
+                    subscription = handle.subscription
+                    if isinstance(subscription, TalkgroupSubscription):
+                        system_id = subscription.system_id
+                        talkgroup_id = subscription.talkgroup_id
+                    elif isinstance(subscription, SystemSubscription):
+                        system_id = subscription.system_id
                     self._telemetry.record_event(
                         AudioErrorEvent(
-                            call_id=chunk.call_id,
-                            system_id=-1,
-                            talkgroup_id=-1,
+                            call_id=event.call_id,
+                            system_id=system_id,
+                            talkgroup_id=talkgroup_id,
                             error_type=exc.__class__.__name__,
                             message=str(exc),
                         )

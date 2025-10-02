@@ -14,7 +14,7 @@ import pytest
 
 from broadcastify_client import (
     ArchiveResult,
-    AudioChunkEvent,
+    AudioPayloadEvent,
     BroadcastifyClient,
     Call,
     Credentials,
@@ -33,14 +33,19 @@ from broadcastify_client.client import (
 )
 from broadcastify_client.http import AsyncHttpClientProtocol
 from broadcastify_client.live_producer import CallPoller
-from broadcastify_client.models import CallMetadata, ChannelDescriptor, Extras, SourceDescriptor
+from broadcastify_client.models import (
+    CallMetadata,
+    ChannelDescriptor,
+    Extras,
+    SourceDescriptor,
+    TranscriptionResult,
+)
 from broadcastify_client.telemetry import NullTelemetrySink, TelemetrySink
 
 TEST_USERNAME = "alice"
 TEST_CREDENTIAL_VALUE = "test-secret"
 EXPECTED_SESSION_VALUE = "token-alice"
 EXPECTED_CALL_ID = "1-2"
-
 
 class StubAuthenticationBackend:
     """Test double that records authentication calls without hitting the network."""
@@ -153,78 +158,93 @@ class StubAudioDownloader:
         """Initialise storage for requested call identifiers."""
         self.requests: list[str] = []
 
-    async def fetch_audio(self, call: LiveCallEnvelope) -> AsyncIterator[AudioChunkEvent]:
-        """Yield two canned audio chunks while recording the call identifier."""
+    async def fetch_audio(self, call: LiveCallEnvelope) -> AsyncIterator[AudioPayloadEvent]:
+        """Yield a single audio payload while recording the call identifier."""
         self.requests.append(call.call.call_id)
 
-        async def _iterator() -> AsyncIterator[AudioChunkEvent]:
-            yield AudioChunkEvent(
+        async def _iterator() -> AsyncIterator[AudioPayloadEvent]:
+            yield AudioPayloadEvent(
                 call_id=call.call.call_id,
                 sequence=1,
                 start_offset=0.0,
-                end_offset=1.0,
-                payload=b"chunk-1",
-                content_type="audio/mpeg",
-                finished=False,
-            )
-            yield AudioChunkEvent(
-                call_id=call.call.call_id,
-                sequence=2,
-                start_offset=1.0,
                 end_offset=2.0,
-                payload=b"chunk-2",
+                payload=b"payload",
                 content_type="audio/mpeg",
                 finished=True,
             )
 
         return _iterator()
 
-def _empty_chunk_list() -> list[AudioChunkEvent]:
-    """Return a new list used for collecting audio chunk events."""
 
+class RecordingTranscriptionBackend:
+    """Transcription backend stub that records finalize calls."""
+
+    def __init__(self) -> None:
+        """Initialise storage for audio streams passed to finalize."""
+        self.requests: list[list[AudioPayloadEvent]] = []
+
+    async def finalize(
+        self, audio_stream: AsyncIterator[AudioPayloadEvent]
+    ) -> TranscriptionResult:
+        """Collect the provided stream and return a canned result."""
+        payloads: list[AudioPayloadEvent] = []
+        async for payload in audio_stream:
+            payloads.append(payload)
+        self.requests.append(payloads)
+        first_call = payloads[0].call_id if payloads else "unknown"
+        return TranscriptionResult(
+            call_id=first_call,
+            text="stub",
+            language="en",
+            average_logprob=None,
+            segments=(),
+        )
+
+def _empty_payload_list() -> list[AudioPayloadEvent]:
+    """Return a new list used for collecting audio payload events."""
     return []
 
 
 @dataclass(slots=True)
 class AudioEventCollector:
-    """Collects audio chunks from raw and processed audio topics."""
+    """Collect audio events from both generic and raw topics."""
 
     general_event: asyncio.Event = field(default_factory=asyncio.Event)
     specific_event: asyncio.Event = field(default_factory=asyncio.Event)
     raw_general_event: asyncio.Event = field(default_factory=asyncio.Event)
     raw_specific_event: asyncio.Event = field(default_factory=asyncio.Event)
-    general_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
-    specific_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
-    raw_general_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
-    raw_specific_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
+    general_payloads: list[AudioPayloadEvent] = field(default_factory=_empty_payload_list)
+    specific_payloads: list[AudioPayloadEvent] = field(default_factory=_empty_payload_list)
+    raw_general_payloads: list[AudioPayloadEvent] = field(default_factory=_empty_payload_list)
+    raw_specific_payloads: list[AudioPayloadEvent] = field(default_factory=_empty_payload_list)
 
     async def handle_general(self, event: object) -> None:
-        """Record audio events published on the general processed topic."""
-        if not isinstance(event, AudioChunkEvent):
+        """Record audio events published on the general topic."""
+        if not isinstance(event, AudioPayloadEvent):
             return
-        self.general_chunks.append(event)
+        self.general_payloads.append(event)
         self.general_event.set()
 
     async def handle_specific(self, event: object) -> None:
-        """Capture processed audio events for a specific call identifier."""
-        if not isinstance(event, AudioChunkEvent):
+        """Capture audio events for a specific call identifier."""
+        if not isinstance(event, AudioPayloadEvent):
             return
-        self.specific_chunks.append(event)
+        self.specific_payloads.append(event)
         if event.finished:
             self.specific_event.set()
 
     async def handle_raw_general(self, event: object) -> None:
-        """Record raw audio chunks before preprocessing occurs."""
-        if not isinstance(event, AudioChunkEvent):
+        """Record raw audio events on the general topic."""
+        if not isinstance(event, AudioPayloadEvent):
             return
-        self.raw_general_chunks.append(event)
+        self.raw_general_payloads.append(event)
         self.raw_general_event.set()
 
     async def handle_raw_specific(self, event: object) -> None:
-        """Capture raw audio chunks scoped to a particular call."""
-        if not isinstance(event, AudioChunkEvent):
+        """Capture raw audio events scoped to a particular call."""
+        if not isinstance(event, AudioPayloadEvent):
             return
-        self.raw_specific_chunks.append(event)
+        self.raw_specific_payloads.append(event)
         if event.finished:
             self.raw_specific_event.set()
 
@@ -240,10 +260,12 @@ async def test_transcription_defaults_to_local_when_api_key_missing(
         def __init__(self, config: TranscriptionConfig) -> None:
             local_calls.append(config)
 
-        async def stream_transcription(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+        async def stream_transcription(
+            self, audio_stream: AsyncIterator[AudioPayloadEvent]
+        ) -> None:
             raise NotImplementedError
 
-        async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+        async def finalize(self, audio_stream: AsyncIterator[AudioPayloadEvent]) -> None:
             raise NotImplementedError
 
     class FailingOpenAIBackend:
@@ -277,10 +299,12 @@ async def test_transcription_respects_local_provider(
         def __init__(self, config: TranscriptionConfig) -> None:
             local_calls.append(config)
 
-        async def stream_transcription(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+        async def stream_transcription(
+            self, audio_stream: AsyncIterator[AudioPayloadEvent]
+        ) -> None:
             raise NotImplementedError
 
-        async def finalize(self, audio_stream: AsyncIterator[AudioChunkEvent]) -> None:
+        async def finalize(self, audio_stream: AsyncIterator[AudioPayloadEvent]) -> None:
             raise NotImplementedError
 
     class RecordingOpenAIBackend:
@@ -489,8 +513,8 @@ async def test_create_live_producer_emits_events_once_started() -> None:
 
 
 @pytest.mark.asyncio
-async def test_audio_pipeline_publishes_chunks() -> None:
-    """Ensure audio pipeline publishes chunks and marks completion."""
+async def test_audio_pipeline_publishes_payloads() -> None:
+    """Ensure audio pipeline publishes payloads and marks completion."""
     backend = StubAuthenticationBackend()
     now = datetime.now(UTC)
     archive_result = ArchiveResult(
@@ -552,14 +576,85 @@ async def test_audio_pipeline_publishes_chunks() -> None:
         await asyncio.wait_for(collector.specific_event.wait(), timeout=1.0)
         await asyncio.wait_for(collector.raw_general_event.wait(), timeout=1.0)
         await asyncio.wait_for(collector.raw_specific_event.wait(), timeout=1.0)
-        assert collector.general_chunks[0].call_id == EXPECTED_CALL_ID
-        assert collector.specific_chunks[-1].finished is True
-        assert collector.raw_general_chunks[0].call_id == EXPECTED_CALL_ID
-        assert collector.raw_specific_chunks[-1].finished is True
+        assert collector.general_payloads[0].call_id == EXPECTED_CALL_ID
+        assert collector.specific_payloads[-1].finished is True
+        assert collector.raw_general_payloads[0].call_id == EXPECTED_CALL_ID
+        assert collector.raw_specific_payloads[-1].finished is True
         assert downloader.requests == [EXPECTED_CALL_ID]
     finally:
         await client.shutdown()
     assert archive_client_stub.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_transcription_emits_final_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure transcription finalises using the raw audio payload."""
+    backend = StubAuthenticationBackend()
+    now = datetime.now(UTC)
+    archive_result = ArchiveResult(
+        calls=[],
+        window=TimeWindow(start=now, end=now + timedelta(minutes=5)),
+        fetched_at=now,
+        cache_hit=False,
+        raw=MappingProxyType({}),
+    )
+    archive_client_stub = StubArchiveClient(archive_result)
+    archive_client = cast(ArchiveClient, archive_client_stub)
+    call_payload = Call(
+        call_id=EXPECTED_CALL_ID,
+        system_id=1,
+        system_name=None,
+        talkgroup_id=2,
+        talkgroup_label=None,
+        talkgroup_description=None,
+        received_at=datetime.now(UTC),
+        frequency_mhz=851.0125,
+        duration_seconds=None,
+        source=SourceDescriptor(),
+        metadata=CallMetadata(),
+    )
+    call_event = LiveCallEnvelope(
+        call=call_payload,
+        cursor=12.0,
+        received_at=datetime.now(UTC),
+        shard_key=(1, 2),
+        raw_payload=MappingProxyType({}),
+    )
+    poller_factory = StubCallPollerFactory(call_event)
+    downloader = StubAudioDownloader()
+    dependencies = BroadcastifyClientDependencies(
+        authentication_backend=backend,
+        archive_client=archive_client,
+        http_client=StubHttpClient(),
+        call_poller_factory=poller_factory,
+        audio_consumer_factory=lambda: AudioConsumer(downloader, telemetry=NullTelemetrySink()),
+        transcription_config=TranscriptionConfig(enabled=True, provider="external"),
+    )
+    client = BroadcastifyClient(dependencies=dependencies)
+
+    backend_stub = RecordingTranscriptionBackend()
+    monkeypatch.setattr(client, "_create_transcription_backend", lambda: backend_stub)
+
+    final_events: list[TranscriptionResult] = []
+    final_event = asyncio.Event()
+
+    async def final_consumer(event: object) -> None:
+        assert isinstance(event, TranscriptionResult)
+        final_events.append(event)
+        final_event.set()
+
+    await client.register_consumer("transcription.complete", final_consumer)
+
+    handle = await client.create_live_producer(system_id=1, talkgroup_id=2)
+    assert handle.topic.endswith("1.2")
+    await client.start()
+    try:
+        await asyncio.wait_for(final_event.wait(), timeout=1.0)
+        assert len(final_events) == 1
+        assert final_events[0].call_id == EXPECTED_CALL_ID
+        assert backend_stub.requests and backend_stub.requests[0][0].payload == b"payload"
+    finally:
+        await client.shutdown()
 
 
 class RecordingHttpClient(AsyncHttpClientProtocol):

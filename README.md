@@ -32,13 +32,11 @@ locally hosted Whisper backend powered by the `faster-whisper` package.
 
 ## Transcription Behavior
 
-- Final-only: streaming partials are removed. The client emits per‑segment updates and a final transcript.
-- Segmentation: calls are preprocessed (band‑limited, tail trimmed), then split by silence (P25 half‑duplex) into short segments.
-- Events:
-  - `transcription.segment` — one event per segment (near real time as segments complete)
-  - `transcription.complete` — final, concatenated transcript per call
-- Preprocessing is enabled by default when transcription is enabled.
-- Broadcastify audio is typically served as M4A (AAC in MP4); the pipeline re-encodes segments to WAV/PCM16 in memory for provider compatibility.
+- Final-only: the pipeline aggregates the full call audio and submits a single request to the provider, emitting exactly one `transcription.complete` event per call.
+- Raw pass-through: the downloaded AAC audio is uploaded as an `.m4a` (`audio/mp4`) stream with no intermediate re-encoding.
+- Strict error surfacing: any provider failure (missing/empty transcript, HTTP error, unsupported format) raises a `TranscriptionError` to the caller so issues are visible in logs instead of silently returning empty text.
+
+Dumping audio (`--dump-audio`) writes the raw payload fetched from Broadcastify without modification.
 
 ## Common Tasks
 

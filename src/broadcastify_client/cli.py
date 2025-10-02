@@ -27,13 +27,7 @@ from .config import (
 )
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
-from .models import (
-    AudioChunkEvent,
-    CallMetadata,
-    LiveCallEnvelope,
-    SourceDescriptor,
-    TranscriptionSegment,
-)
+from .models import AudioPayloadEvent, CallMetadata, LiveCallEnvelope, SourceDescriptor
 
 LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
@@ -220,7 +214,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
     parser.add_argument(
         "--dump-audio",
         action="store_true",
-        help="Persist raw and processed audio for inspection",
+        help="Persist raw audio for inspection",
     )
     parser.add_argument(
         "--dump-audio-dir",
@@ -394,23 +388,6 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     return _printer
 
 
-def _create_transcript_segment_printer() -> ConsumerCallback:
-    """Return a coroutine callback that prints per-segment transcription text."""
-    print_lock = asyncio.Lock()
-
-    async def _printer(event: object) -> None:
-        if not isinstance(event, TranscriptionSegment):
-            return
-        text = event.text.strip()
-        if not text:
-            return
-        line = f"  -> {text}"
-        async with print_lock:
-            print(line, flush=True)
-
-    return _printer
-
-
 def _format_event_header(event: LiveCallEnvelope) -> str:
     """Return a compact, single-line header summarizing the call event."""
     call = event.call
@@ -550,13 +527,8 @@ async def _register_live_consumers(
             await client.register_consumer(topic, printer)
 
     if transcription_cfg.enabled:
-        await client.register_consumer(
-            "transcription.segment",
-            _create_transcript_segment_printer(),
-        )
         # Final concatenated transcript printer (simple one-line output)
         async def _final_printer(event: object) -> None:
-            # Final result concatenated across segments; avoid top-level import
             if event.__class__.__name__ != "TranscriptionResult":
                 return
             text = str(getattr(event, "text", "")).strip()
@@ -570,109 +542,69 @@ async def _register_live_consumers(
 async def _maybe_register_audio_dumpers(
     client: BroadcastifyClient, options: CliOptions, logger: logging.Logger
 ) -> None:
-    """Register consumers that dump raw and processed audio when requested."""
+    """Register consumers that dump raw audio when requested."""
     if not options.dump_audio or options.dump_audio_dir is None:
         return
     dump_dir = options.dump_audio_dir
     dump_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Audio dumping enabled; writing files to %s", dump_dir)
-    manager = _AudioDumpManager(dump_dir, logger)
-    await client.register_consumer("calls.audio.raw", manager.handle_raw_chunk)
-    await client.register_consumer("calls.audio", manager.handle_processed_chunk)
+    manager = AudioDumpManager(dump_dir, logger)
+    await client.register_consumer("calls.audio.raw", manager.handle_raw_payload)
 
 
-def _empty_bytes_list() -> list[bytes]:
-    """Return a new list for accumulating byte payloads."""
-
-    return []
-
-
-@dataclass(slots=True)
-class _AudioDumpState:
-    raw_parts: list[bytes] = field(default_factory=_empty_bytes_list)
-    raw_content_type: str | None = None
-    raw_dumped: bool = False
-    processed_parts: list[bytes] = field(default_factory=_empty_bytes_list)
-    processed_content_type: str | None = None
-    processed_dumped: bool = False
-
-
-class _AudioDumpManager:
-    """Accumulates audio chunks and writes raw/processed payloads to disk."""
+class AudioDumpManager:
+    """Accumulates raw audio and writes a single file per call."""
 
     def __init__(self, directory: Path, logger: logging.Logger) -> None:
+        """Initialise the manager with the destination directory and logger."""
         self._directory = directory
         self._logger = logger
-        self._states: dict[str, _AudioDumpState] = {}
+        self._buffers: dict[str, list[bytes]] = {}
+        self._content_types: dict[str, str | None] = {}
+        self._occurrence_counters: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    async def handle_raw_chunk(self, event: object) -> None:
-        if not isinstance(event, AudioChunkEvent):
-            return
-        await self._handle_chunk(event, kind="raw")
+    def _next_occurrence(self, call_id: str) -> int:
+        current = self._occurrence_counters.get(call_id, 0) + 1
+        self._occurrence_counters[call_id] = current
+        return current
 
-    async def handle_processed_chunk(self, event: object) -> None:
-        if not isinstance(event, AudioChunkEvent):
+    async def handle_raw_payload(self, event: object) -> None:
+        """Persist the raw audio payload when the call is complete."""
+        if not isinstance(event, AudioPayloadEvent):
             return
-        await self._handle_chunk(event, kind="processed")
-
-    async def _handle_chunk(self, chunk: AudioChunkEvent, *, kind: str) -> None:
+        writes: list[tuple[str, bytes, str | None, int]] = []
         async with self._lock:
-            state = self._states.setdefault(chunk.call_id, _AudioDumpState())
-            if kind == "raw":
-                state.raw_parts.append(chunk.payload)
-                if state.raw_content_type is None:
-                    state.raw_content_type = chunk.content_type
-                should_dump = chunk.finished and not state.raw_dumped
-                parts = list(state.raw_parts) if should_dump else []
-                content_type = state.raw_content_type if should_dump else None
-                if should_dump:
-                    state.raw_parts.clear()
-                    state.raw_dumped = True
-            else:
-                state.processed_parts.append(chunk.payload)
-                if state.processed_content_type is None:
-                    state.processed_content_type = chunk.content_type
-                should_dump = chunk.finished and not state.processed_dumped
-                parts = list(state.processed_parts) if should_dump else []
-                content_type = state.processed_content_type if should_dump else None
-                if should_dump:
-                    state.processed_parts.clear()
-                    state.processed_dumped = True
-            cleanup = state.raw_dumped and state.processed_dumped
+            parts = self._buffers.setdefault(event.call_id, [])
+            parts.append(event.payload)
+            if event.call_id not in self._content_types:
+                self._content_types[event.call_id] = event.content_type
+            if event.finished:
+                payload = b"".join(parts)
+                parts.clear()
+                content_type = self._content_types.pop(event.call_id, event.content_type)
+                occurrence = self._next_occurrence(event.call_id)
+                if payload:
+                    writes.append((event.call_id, payload, content_type, occurrence))
+                self._buffers.pop(event.call_id, None)
 
-        if not should_dump or content_type is None:
-            if cleanup:
-                await self._cleanup(chunk.call_id)
-            return
-
-        payload = b"".join(parts)
-        label = "raw" if kind == "raw" else "processed"
-        await self._write_call_audio(chunk.call_id, payload, content_type, label)
-        if cleanup:
-            await self._cleanup(chunk.call_id)
-
-    async def _cleanup(self, call_id: str) -> None:
-        async with self._lock:
-            self._states.pop(call_id, None)
+        for call_id, data, content_type, occurrence in writes:
+            await self._write_call_audio(call_id, data, content_type, occurrence)
 
     async def _write_call_audio(
-        self, call_id: str, data: bytes, content_type: str, label: str
+        self, call_id: str, data: bytes, content_type: str | None, occurrence: int
     ) -> None:
         if not data:
-            self._logger.debug(
-                "Skipping %s audio dump for call %s due to empty payload", label, call_id
-            )
+            self._logger.debug("Skipping audio dump for call %s due to empty payload", call_id)
             return
         safe_call_id = _sanitize_filename_fragment(call_id)
-        suffix = _suffix_for_content_type(content_type)
-        filename = f"{safe_call_id}_{label}{suffix}"
+        suffix = _suffix_for_content_type(content_type or "")
+        prefix = f"{safe_call_id}_{occurrence:04d}"
+        filename = f"{prefix}_raw{suffix}"
         target = _dedupe_path(self._directory / filename)
-        self._logger.debug(
-            "Writing %s audio dump for call %s to %s", label, call_id, target
-        )
+        self._logger.debug("Writing raw audio dump for call %s to %s", call_id, target)
         await asyncio.to_thread(target.write_bytes, data)
-        self._logger.info("Wrote %s audio dump for call %s", label, call_id)
+        self._logger.info("Wrote raw audio dump for call %s", call_id)
 
 
 _FILENAME_SAFE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]+")

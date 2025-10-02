@@ -8,24 +8,24 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from .errors import AudioDownloadError
-from .models import AudioChunkEvent, LiveCallEnvelope
+from .models import AudioPayloadEvent, LiveCallEnvelope
 from .telemetry import NullTelemetrySink, TelemetrySink
 
 logger = logging.getLogger(__name__)
 
 
 class AudioDownloader(Protocol):
-    """Protocol describing the interface for downloading audio chunks."""
+    """Protocol describing the interface for downloading call audio."""
 
     async def fetch_audio(
         self, call: LiveCallEnvelope
-    ) -> AsyncIterator[AudioChunkEvent]:  # pragma: no cover - protocol
-        """Yield audio chunks for *call*."""
+    ) -> AsyncIterator[AudioPayloadEvent]:  # pragma: no cover - protocol
+        """Yield audio payload events for *call*."""
         ...
 
 
 class AudioConsumer:
-    """Consumes call events and emits audio chunk events."""
+    """Consumes call events and emits audio payload events."""
 
     def __init__(
         self,
@@ -38,9 +38,9 @@ class AudioConsumer:
         self._telemetry = telemetry or NullTelemetrySink()
 
     async def consume(
-        self, call_event: LiveCallEnvelope, queue: asyncio.Queue[AudioChunkEvent]
+        self, call_event: LiveCallEnvelope, queue: asyncio.Queue[AudioPayloadEvent]
     ) -> None:
-        """Download audio for *call_event* and enqueue resulting chunks."""
+        """Download audio for *call_event* and enqueue the resulting event."""
         logger.debug(
             "Starting audio download for call %s (system %s, talkgroup %s)",
             call_event.call.call_id,
@@ -49,9 +49,9 @@ class AudioConsumer:
         )
         try:
             audio_stream = await self._downloader.fetch_audio(call_event)
-            async for chunk in audio_stream:
-                await queue.put(chunk)
-                if chunk.finished:
+            async for event in audio_stream:
+                await queue.put(event)
+                if event.finished:
                     break
         except AudioDownloadError as exc:
             logger.warning(

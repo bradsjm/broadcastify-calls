@@ -22,7 +22,7 @@ from .config import (
 from .eventbus import ConsumerCallback, EventBus
 from .models import (
     ArchiveResult,
-    AudioChunkEvent,
+    AudioPayloadEvent,
     Call,
     LiveCallEnvelope,
     PlaylistDescriptor,
@@ -36,13 +36,12 @@ from .models import (
     TalkgroupSummary,
     TimeWindow,
     TranscriptionResult,
-    TranscriptionSegment,
 )
 
 __all__ = [
     "ArchiveResult",
     "AsyncBroadcastifyClient",
-    "AudioChunkEvent",
+    "AudioPayloadEvent",
     "BroadcastifyClient",
     "BroadcastifyClientDependencies",
     "CacheConfig",
@@ -69,6 +68,5 @@ __all__ = [
     "TimeWindow",
     "TranscriptionConfig",
     "TranscriptionResult",
-    "TranscriptionSegment",
     "load_credentials_from_environment",
 ]
