@@ -60,9 +60,3 @@ src/
     py.typed
  tests/                   # pytest-based async tests (placeholder)
 ```
-
-## Next Steps
-
-- Implement the async HTTP client abstractions, authentication, and event bus described in `API.md`.
-- Define Pydantic configuration models under `config.py` to validate credentials and runtime tuning.
-- Add contract and integration tests covering header spoofing, rate limiting, and transcription flows.

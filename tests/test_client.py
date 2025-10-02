@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import cast
@@ -177,6 +178,55 @@ class StubAudioDownloader:
             )
 
         return _iterator()
+
+def _empty_chunk_list() -> list[AudioChunkEvent]:
+    """Return a new list used for collecting audio chunk events."""
+
+    return []
+
+
+@dataclass(slots=True)
+class AudioEventCollector:
+    """Collects audio chunks from raw and processed audio topics."""
+
+    general_event: asyncio.Event = field(default_factory=asyncio.Event)
+    specific_event: asyncio.Event = field(default_factory=asyncio.Event)
+    raw_general_event: asyncio.Event = field(default_factory=asyncio.Event)
+    raw_specific_event: asyncio.Event = field(default_factory=asyncio.Event)
+    general_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
+    specific_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
+    raw_general_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
+    raw_specific_chunks: list[AudioChunkEvent] = field(default_factory=_empty_chunk_list)
+
+    async def handle_general(self, event: object) -> None:
+        """Record audio events published on the general processed topic."""
+        if not isinstance(event, AudioChunkEvent):
+            return
+        self.general_chunks.append(event)
+        self.general_event.set()
+
+    async def handle_specific(self, event: object) -> None:
+        """Capture processed audio events for a specific call identifier."""
+        if not isinstance(event, AudioChunkEvent):
+            return
+        self.specific_chunks.append(event)
+        if event.finished:
+            self.specific_event.set()
+
+    async def handle_raw_general(self, event: object) -> None:
+        """Record raw audio chunks before preprocessing occurs."""
+        if not isinstance(event, AudioChunkEvent):
+            return
+        self.raw_general_chunks.append(event)
+        self.raw_general_event.set()
+
+    async def handle_raw_specific(self, event: object) -> None:
+        """Capture raw audio chunks scoped to a particular call."""
+        if not isinstance(event, AudioChunkEvent):
+            return
+        self.raw_specific_chunks.append(event)
+        if event.finished:
+            self.raw_specific_event.set()
 
 
 @pytest.mark.asyncio
@@ -483,33 +533,29 @@ async def test_audio_pipeline_publishes_chunks() -> None:
     )
     client = BroadcastifyClient(dependencies=dependencies)
 
-    audio_general_event = asyncio.Event()
-    audio_specific_event = asyncio.Event()
-    received_audio_general: list[AudioChunkEvent] = []
-    received_audio_specific: list[AudioChunkEvent] = []
+    collector = AudioEventCollector()
 
-    async def audio_general_consumer(event: object) -> None:
-        assert isinstance(event, AudioChunkEvent)
-        received_audio_general.append(event)
-        audio_general_event.set()
-
-    async def audio_specific_consumer(event: object) -> None:
-        assert isinstance(event, AudioChunkEvent)
-        received_audio_specific.append(event)
-        if event.finished:
-            audio_specific_event.set()
-
-    await client.register_consumer("calls.audio", audio_general_consumer)
-    await client.register_consumer(f"calls.audio.{EXPECTED_CALL_ID}", audio_specific_consumer)
+    await client.register_consumer("calls.audio", collector.handle_general)
+    await client.register_consumer(
+        f"calls.audio.{EXPECTED_CALL_ID}", collector.handle_specific
+    )
+    await client.register_consumer("calls.audio.raw", collector.handle_raw_general)
+    await client.register_consumer(
+        f"calls.audio.raw.{EXPECTED_CALL_ID}", collector.handle_raw_specific
+    )
 
     handle = await client.create_live_producer(system_id=1, talkgroup_id=2)
     assert handle.topic.endswith("1.2")
     await client.start()
     try:
-        await asyncio.wait_for(audio_general_event.wait(), timeout=1.0)
-        await asyncio.wait_for(audio_specific_event.wait(), timeout=1.0)
-        assert received_audio_general[0].call_id == EXPECTED_CALL_ID
-        assert received_audio_specific[-1].finished is True
+        await asyncio.wait_for(collector.general_event.wait(), timeout=1.0)
+        await asyncio.wait_for(collector.specific_event.wait(), timeout=1.0)
+        await asyncio.wait_for(collector.raw_general_event.wait(), timeout=1.0)
+        await asyncio.wait_for(collector.raw_specific_event.wait(), timeout=1.0)
+        assert collector.general_chunks[0].call_id == EXPECTED_CALL_ID
+        assert collector.specific_chunks[-1].finished is True
+        assert collector.raw_general_chunks[0].call_id == EXPECTED_CALL_ID
+        assert collector.raw_specific_chunks[-1].finished is True
         assert downloader.requests == [EXPECTED_CALL_ID]
     finally:
         await client.shutdown()

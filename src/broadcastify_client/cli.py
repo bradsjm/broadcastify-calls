@@ -6,11 +6,13 @@ import argparse
 import asyncio
 import logging
 import os
+import re
+import secrets
 import signal
 import sys
 import traceback
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, cast
@@ -26,6 +28,7 @@ from .config import (
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
 from .models import (
+    AudioChunkEvent,
     CallMetadata,
     LiveCallEnvelope,
     SourceDescriptor,
@@ -57,6 +60,8 @@ class CliOptions:
     log_level: int
     metadata_limit: int
     transcription: bool
+    dump_audio: bool = field(default=False)
+    dump_audio_dir: Path | None = field(default=None)
 
 
 async def run_async(options: CliOptions) -> int:
@@ -99,6 +104,7 @@ async def run_async(options: CliOptions) -> int:
         token_acquired = True
         await _setup_producers(client, options)
         await _register_live_consumers(client, options, options.metadata_limit, transcription_cfg)
+        await _maybe_register_audio_dumpers(client, options, logger)
         await client.start()
         logger.info(_streaming_banner(options))
         await _wait_for_shutdown_signal()
@@ -211,6 +217,19 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
             "respects OPENAI_BASE_URL)"
         ),
     )
+    parser.add_argument(
+        "--dump-audio",
+        action="store_true",
+        help="Persist raw and processed audio for inspection",
+    )
+    parser.add_argument(
+        "--dump-audio-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for dumped audio files (defaults to ./audio-dumps when --dump-audio is set)"
+        ),
+    )
 
     namespace = parser.parse_args(argv)
     # Normalise talkgroup list; argparse yields None if not provided.
@@ -233,6 +252,15 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         if not has_system:
             parser.error("--system-id is required when not using --playlist-id")
 
+    dump_audio_requested = bool(getattr(namespace, "dump_audio", False))
+    dump_audio_dir: Path | None = getattr(namespace, "dump_audio_dir", None)
+    if dump_audio_dir is not None and not dump_audio_requested:
+        dump_audio_requested = True
+    resolved_dump_dir: Path | None = None
+    if dump_audio_requested:
+        candidate = dump_audio_dir or (Path.cwd() / "audio-dumps")
+        resolved_dump_dir = candidate.expanduser().resolve()
+
     return CliOptions(
         system_id=namespace.system_id if not has_playlist else None,
         talkgroup_ids=() if has_playlist else talkgroup_ids,
@@ -243,6 +271,8 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         log_level=LOG_LEVELS[namespace.log_level],
         metadata_limit=namespace.metadata_limit,
         transcription=bool(getattr(namespace, "transcription", False)),
+        dump_audio=dump_audio_requested,
+        dump_audio_dir=resolved_dump_dir,
     )
 
 
@@ -535,6 +565,155 @@ async def _register_live_consumers(
             print(f"  --> {text}", flush=True)
 
         await client.register_consumer("transcription.complete", _final_printer)
+
+
+async def _maybe_register_audio_dumpers(
+    client: BroadcastifyClient, options: CliOptions, logger: logging.Logger
+) -> None:
+    """Register consumers that dump raw and processed audio when requested."""
+    if not options.dump_audio or options.dump_audio_dir is None:
+        return
+    dump_dir = options.dump_audio_dir
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Audio dumping enabled; writing files to %s", dump_dir)
+    manager = _AudioDumpManager(dump_dir, logger)
+    await client.register_consumer("calls.audio.raw", manager.handle_raw_chunk)
+    await client.register_consumer("calls.audio", manager.handle_processed_chunk)
+
+
+def _empty_bytes_list() -> list[bytes]:
+    """Return a new list for accumulating byte payloads."""
+
+    return []
+
+
+@dataclass(slots=True)
+class _AudioDumpState:
+    raw_parts: list[bytes] = field(default_factory=_empty_bytes_list)
+    raw_content_type: str | None = None
+    raw_dumped: bool = False
+    processed_parts: list[bytes] = field(default_factory=_empty_bytes_list)
+    processed_content_type: str | None = None
+    processed_dumped: bool = False
+
+
+class _AudioDumpManager:
+    """Accumulates audio chunks and writes raw/processed payloads to disk."""
+
+    def __init__(self, directory: Path, logger: logging.Logger) -> None:
+        self._directory = directory
+        self._logger = logger
+        self._states: dict[str, _AudioDumpState] = {}
+        self._lock = asyncio.Lock()
+
+    async def handle_raw_chunk(self, event: object) -> None:
+        if not isinstance(event, AudioChunkEvent):
+            return
+        await self._handle_chunk(event, kind="raw")
+
+    async def handle_processed_chunk(self, event: object) -> None:
+        if not isinstance(event, AudioChunkEvent):
+            return
+        await self._handle_chunk(event, kind="processed")
+
+    async def _handle_chunk(self, chunk: AudioChunkEvent, *, kind: str) -> None:
+        async with self._lock:
+            state = self._states.setdefault(chunk.call_id, _AudioDumpState())
+            if kind == "raw":
+                state.raw_parts.append(chunk.payload)
+                if state.raw_content_type is None:
+                    state.raw_content_type = chunk.content_type
+                should_dump = chunk.finished and not state.raw_dumped
+                parts = list(state.raw_parts) if should_dump else []
+                content_type = state.raw_content_type if should_dump else None
+                if should_dump:
+                    state.raw_parts.clear()
+                    state.raw_dumped = True
+            else:
+                state.processed_parts.append(chunk.payload)
+                if state.processed_content_type is None:
+                    state.processed_content_type = chunk.content_type
+                should_dump = chunk.finished and not state.processed_dumped
+                parts = list(state.processed_parts) if should_dump else []
+                content_type = state.processed_content_type if should_dump else None
+                if should_dump:
+                    state.processed_parts.clear()
+                    state.processed_dumped = True
+            cleanup = state.raw_dumped and state.processed_dumped
+
+        if not should_dump or content_type is None:
+            if cleanup:
+                await self._cleanup(chunk.call_id)
+            return
+
+        payload = b"".join(parts)
+        label = "raw" if kind == "raw" else "processed"
+        await self._write_call_audio(chunk.call_id, payload, content_type, label)
+        if cleanup:
+            await self._cleanup(chunk.call_id)
+
+    async def _cleanup(self, call_id: str) -> None:
+        async with self._lock:
+            self._states.pop(call_id, None)
+
+    async def _write_call_audio(
+        self, call_id: str, data: bytes, content_type: str, label: str
+    ) -> None:
+        if not data:
+            self._logger.debug(
+                "Skipping %s audio dump for call %s due to empty payload", label, call_id
+            )
+            return
+        safe_call_id = _sanitize_filename_fragment(call_id)
+        suffix = _suffix_for_content_type(content_type)
+        filename = f"{safe_call_id}_{label}{suffix}"
+        target = _dedupe_path(self._directory / filename)
+        self._logger.debug(
+            "Writing %s audio dump for call %s to %s", label, call_id, target
+        )
+        await asyncio.to_thread(target.write_bytes, data)
+        self._logger.info("Wrote %s audio dump for call %s", label, call_id)
+
+
+_FILENAME_SAFE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _sanitize_filename_fragment(value: str) -> str:
+    """Return a filesystem-safe fragment derived from *value*."""
+    cleaned = _FILENAME_SAFE_PATTERN.sub("_", value)
+    return cleaned or "call"
+
+
+def _suffix_for_content_type(content_type: str) -> str:
+    """Return a file suffix for *content_type*, defaulting to .bin."""
+    mapping: dict[str, str] = {
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/aac": ".aac",
+        "audio/mp4": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/ogg": ".ogg",
+        "audio/x-flac": ".flac",
+        "audio/flac": ".flac",
+    }
+    base = content_type.split(";", 1)[0].strip().lower()
+    return mapping.get(base, ".bin")
+
+
+def _dedupe_path(candidate: Path) -> Path:
+    """Return a unique path by appending a numeric suffix when needed."""
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    parent = candidate.parent
+    for index in range(1, 10_000):
+        attempt = parent / f"{stem}_{index}{suffix}"
+        if not attempt.exists():
+            return attempt
+    return parent / f"{stem}_{secrets.token_hex(4)}{suffix}"  # pragma: no cover - fallback
 
 
 def main(argv: Sequence[str] | None = None) -> None:

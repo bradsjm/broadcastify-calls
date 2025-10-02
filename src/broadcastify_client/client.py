@@ -351,6 +351,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._started = False
         self._live_topic = "calls.live"
         self._audio_topic = "calls.audio"
+        self._audio_raw_topic = "calls.audio.raw"
         self._transcript_segment_topic = "transcription.segment"
         self._transcript_final_topic = "transcription.complete"
         self._transcription_buffers: dict[CallId, list[AudioChunkEvent]] = {}
@@ -686,6 +687,10 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                     # Buffer raw chunk for segmentation/finalization
                     raw_list = self._transcription_raw_buffers.setdefault(chunk.call_id, [])
                     raw_list.append(chunk)
+                    await self._event_bus.publish(self._audio_raw_topic, chunk)
+                    await self._event_bus.publish(
+                        f"{self._audio_raw_topic}.{chunk.call_id}", chunk
+                    )
                     # Phase 1 pre-processing: band-limit + tail trim (if enabled)
                     if self._preprocessor is not None:
                         try:
