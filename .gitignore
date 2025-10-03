@@ -23,3 +23,9 @@ uv.lock
 
 # Egg
 *.egg-info/
+
+# Serena
+.serena/
+
+# Audio dumps
+audio-dumps/
