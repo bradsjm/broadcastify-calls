@@ -15,8 +15,10 @@ from uuid import uuid4
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
 from .audio_downloader_http import HttpAudioDownloader
+from .audio_processing import AudioProcessor, NullAudioProcessor
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import (
+    AudioProcessingConfig,
     Credentials,
     HttpClientConfig,
     LiveProducerConfig,
@@ -302,6 +304,8 @@ class BroadcastifyClientDependencies:
     call_poller_factory: CallPollerFactory | None = None
     audio_consumer_factory: Callable[[], AudioConsumer] | None = None
     transcription_config: TranscriptionConfig | None = None
+    audio_processing_config: AudioProcessingConfig | None = None
+    audio_processor_factory: Callable[[], AudioProcessor] | None = None
     playlist_catalog: PlaylistCatalog | None = None
     discovery_client: DiscoveryService | None = None
 
@@ -328,9 +332,13 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._event_bus = deps.event_bus or EventBus()
         self._call_poller_factory = deps.call_poller_factory or _DefaultCallPollerFactory()
         self._audio_consumer_factory = deps.audio_consumer_factory
+        self._audio_processor_factory = deps.audio_processor_factory
         self._playlist_catalog = deps.playlist_catalog
         self._discovery_client = deps.discovery_client
         self._transcription_config = deps.transcription_config or TranscriptionConfig()
+        self._audio_processing_config = (
+            deps.audio_processing_config or AudioProcessingConfig()
+        )
         self._transcription_pipeline: TranscriptionPipeline | None = None
         self._producer_handles: dict[str, ProducerHandle] = {}
         self._handles_lock = asyncio.Lock()
@@ -348,6 +356,12 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         if config.provider in {"openai", "external"}:
             return OpenAIWhisperBackend(config)
         raise ValueError(f"Unsupported transcription provider '{config.provider}'")
+
+    def _create_audio_processor(self) -> AudioProcessor:
+        """Return an audio processor instance based on configured overrides."""
+        if self._audio_processor_factory is not None:
+            return self._audio_processor_factory()
+        return NullAudioProcessor()
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate against Broadcastify and return a validated session token."""
@@ -534,12 +548,19 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         )
         audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
         audio_queue: asyncio.Queue[AudioPayloadEvent] | None = None
+        processing_enabled = self._audio_processing_config.enabled
+
         if audio_consumer is not None:
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
-        elif self._transcription_config.enabled:
-            # Default to HTTP downloader when transcription is enabled and no override provided
+        elif self._transcription_config.enabled or processing_enabled:
+            # Default to HTTP downloader when audio-derived features are enabled
             downloader = HttpAudioDownloader(self._http_client, self._authenticator)
-            audio_consumer = AudioConsumer(downloader, telemetry=self._telemetry)
+            processor = self._create_audio_processor()
+            audio_consumer = AudioConsumer(
+                downloader,
+                telemetry=self._telemetry,
+                processor=processor,
+            )
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)
         handle = ProducerHandle(
             id=handle_id,

@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from broadcastify_client.cli import AudioDumpManager, parse_cli_args
+from broadcastify_client.cli import (
+    AudioDumpManager,
+    parse_cli_args,
+    resolve_audio_processing_config,
+)
 from broadcastify_client.models import AudioPayloadEvent
 
 
@@ -19,6 +23,10 @@ def test_parse_cli_defaults_without_audio_dump(
     options = parse_cli_args(["--system-id", "123"])
     assert options.dump_audio is False
     assert options.dump_audio_dir is None
+    assert options.audio_processing is False
+    assert options.audio_silence_threshold_db is None
+    assert options.audio_min_silence_ms is None
+    assert options.audio_analysis_window_ms is None
 
 
 def test_parse_cli_enables_dump_with_default_directory(
@@ -29,6 +37,7 @@ def test_parse_cli_enables_dump_with_default_directory(
     options = parse_cli_args(["--system-id", "123", "--dump-audio"])
     assert options.dump_audio is True
     assert options.dump_audio_dir == tmp_path.resolve() / "audio-dumps"
+    assert options.audio_processing is False
 
 
 def test_parse_cli_accepts_custom_dump_directory(tmp_path: Path) -> None:
@@ -39,6 +48,40 @@ def test_parse_cli_accepts_custom_dump_directory(tmp_path: Path) -> None:
     )
     assert options.dump_audio is True
     assert options.dump_audio_dir == custom_dir.resolve()
+    assert options.audio_processing is False
+
+
+def test_resolve_audio_processing_config_cli_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI overrides enable audio processing and adjust thresholds."""
+    monkeypatch.delenv("AUDIO_PROCESSING_ENABLED", raising=False)
+    monkeypatch.delenv("AUDIO_SILENCE_THRESHOLD_DB", raising=False)
+    monkeypatch.delenv("AUDIO_MIN_SILENCE_MS", raising=False)
+    monkeypatch.delenv("AUDIO_ANALYSIS_WINDOW_MS", raising=False)
+
+    silence_threshold_db = -42.5
+    min_silence_ms = 150
+    analysis_window_ms = 30
+
+    options = parse_cli_args(
+        [
+            "--system-id",
+            "123",
+            "--audio-processing",
+            "--audio-silence-threshold-db",
+            str(silence_threshold_db),
+            "--audio-min-silence-ms",
+            str(min_silence_ms),
+            "--audio-analysis-window-ms",
+            str(analysis_window_ms),
+        ]
+    )
+    config = resolve_audio_processing_config(options, logging.getLogger("test"))
+    assert config.enabled is True
+    assert config.silence_threshold_db == silence_threshold_db
+    assert config.min_silence_duration_ms == min_silence_ms
+    assert config.analysis_window_ms == analysis_window_ms
 
 
 @pytest.mark.asyncio

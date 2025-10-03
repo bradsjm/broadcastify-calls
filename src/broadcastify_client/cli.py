@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Final, cast
 
 from dotenv import find_dotenv, load_dotenv
+from pydantic import ValidationError
 
 from .client import BroadcastifyClient, BroadcastifyClientDependencies
 from .config import (
+    AudioProcessingConfig,
     Credentials,
     TranscriptionConfig,
     load_credentials_from_environment,
@@ -56,6 +58,10 @@ class CliOptions:
     transcription: bool
     dump_audio: bool = field(default=False)
     dump_audio_dir: Path | None = field(default=None)
+    audio_processing: bool = field(default=False)
+    audio_silence_threshold_db: float | None = field(default=None)
+    audio_min_silence_ms: int | None = field(default=None)
+    audio_analysis_window_ms: int | None = field(default=None)
 
 
 async def run_async(options: CliOptions) -> int:
@@ -75,6 +81,7 @@ async def run_async(options: CliOptions) -> int:
 
     try:
         credentials = _resolve_credentials(options)
+        audio_processing_cfg = resolve_audio_processing_config(options, logger)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -91,7 +98,7 @@ async def run_async(options: CliOptions) -> int:
     )
 
     transcription_cfg = _resolve_transcription_config(options.transcription, logger)
-    client = _build_client(transcription_cfg)
+    client = _build_client(transcription_cfg, audio_processing_cfg)
     token_acquired = False
     try:
         await client.authenticate(credentials)
@@ -212,6 +219,29 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         ),
     )
     parser.add_argument(
+        "--audio-processing",
+        action="store_true",
+        help="Enable optional audio post-processing (silence trimming)",
+    )
+    parser.add_argument(
+        "--audio-silence-threshold-db",
+        type=float,
+        default=None,
+        help="Silence detection threshold in dB (default: -50)",
+    )
+    parser.add_argument(
+        "--audio-min-silence-ms",
+        type=int,
+        default=None,
+        help="Minimum silence duration in milliseconds (default: 200)",
+    )
+    parser.add_argument(
+        "--audio-analysis-window-ms",
+        type=int,
+        default=None,
+        help="Analysis window size in milliseconds (default: 20)",
+    )
+    parser.add_argument(
         "--dump-audio",
         action="store_true",
         help="Persist raw audio for inspection",
@@ -233,6 +263,10 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         parser.error("--metadata-limit must be zero or positive")
     if namespace.history < 0:
         parser.error("--history must be zero or positive")
+    if namespace.audio_min_silence_ms is not None and namespace.audio_min_silence_ms < 0:
+        parser.error("--audio-min-silence-ms must be zero or positive")
+    if namespace.audio_analysis_window_ms is not None and namespace.audio_analysis_window_ms <= 0:
+        parser.error("--audio-analysis-window-ms must be greater than zero")
 
     # Validate mutually exclusive modes
     playlist_id: str | None = namespace.playlist_id
@@ -267,6 +301,10 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         transcription=bool(getattr(namespace, "transcription", False)),
         dump_audio=dump_audio_requested,
         dump_audio_dir=resolved_dump_dir,
+        audio_processing=bool(getattr(namespace, "audio_processing", False)),
+        audio_silence_threshold_db=cast(float | None, namespace.audio_silence_threshold_db),
+        audio_min_silence_ms=cast(int | None, namespace.audio_min_silence_ms),
+        audio_analysis_window_ms=cast(int | None, namespace.audio_analysis_window_ms),
     )
 
 
@@ -328,12 +366,57 @@ def _resolve_transcription_config(
     return cfg
 
 
-def _build_client(cfg: TranscriptionConfig) -> BroadcastifyClient:
-    """Construct a BroadcastifyClient, enabling transcription when configured."""
+def resolve_audio_processing_config(
+    options: CliOptions, logger: logging.Logger
+) -> AudioProcessingConfig:
+    """Resolve audio processing configuration from environment variables and CLI overrides."""
+    try:
+        cfg = AudioProcessingConfig.from_environment()
+    except ValueError as exc:
+        raise ValueError(f"invalid audio processing environment configuration: {exc}") from exc
+
+    updates: dict[str, bool | float | int] = {}
+    if options.audio_processing:
+        updates["enabled"] = True
+    if options.audio_silence_threshold_db is not None:
+        updates["silence_threshold_db"] = options.audio_silence_threshold_db
+    if options.audio_min_silence_ms is not None:
+        updates["min_silence_duration_ms"] = options.audio_min_silence_ms
+    if options.audio_analysis_window_ms is not None:
+        updates["analysis_window_ms"] = options.audio_analysis_window_ms
+
+    if updates:
+        try:
+            cfg = cfg.model_copy(update=updates)
+        except ValidationError as exc:
+            errors = ", ".join(error.get("msg", "invalid value") for error in exc.errors())
+            raise ValueError(f"invalid audio processing override: {errors}") from exc
+
     if cfg.enabled:
-        deps = BroadcastifyClientDependencies(transcription_config=cfg)
-        return BroadcastifyClient(dependencies=deps)
-    return BroadcastifyClient()
+        logger.info(
+            "Audio processing enabled (threshold=%.1f dB, min_silence=%d ms, window=%d ms)",
+            cfg.silence_threshold_db,
+            cfg.min_silence_duration_ms,
+            cfg.analysis_window_ms,
+        )
+    else:
+        logger.debug("Audio processing disabled")
+
+    return cfg
+
+
+def _build_client(
+    transcription_cfg: TranscriptionConfig, audio_cfg: AudioProcessingConfig
+) -> BroadcastifyClient:
+    """Construct a BroadcastifyClient with optional transcription and audio processing."""
+    if transcription_cfg.enabled:
+        dependencies = BroadcastifyClientDependencies(
+            transcription_config=transcription_cfg,
+            audio_processing_config=audio_cfg,
+        )
+    else:
+        dependencies = BroadcastifyClientDependencies(audio_processing_config=audio_cfg)
+    return BroadcastifyClient(dependencies=dependencies)
 
 
 async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import Literal
+from typing import Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, NonNegativeInt, PositiveFloat
 
@@ -140,7 +140,7 @@ class TranscriptionConfig(BaseModel):
         ),
     )
     device: str = Field(
-        default="cpu",
+        default="auto",
         description=(
             "Hardware device for local faster-whisper models (e.g. 'cpu', 'cuda', 'auto'). "
             "Ignored for remote providers."
@@ -204,13 +204,12 @@ class TranscriptionConfig(BaseModel):
         )
 
 
-class AudioPreprocessConfig(BaseModel):
-    """Settings controlling optional in-memory audio pre-processing.
+class AudioProcessingConfig(BaseModel):
+    """Configuration toggles for optional audio post-processing.
 
-    Phase 1 focuses on voice-band limiting and tail-silence trimming to remove
-    squelch closures and courtesy tones/beeps at the end of recordings. All
-    processing occurs in-memory via PyAV (libav) without external executables
-    or temporary files.
+    The initial implementation focuses on trimming leading/trailing silence while keeping
+    Broadcastify's AAC containers intact. Processing remains disabled by default to avoid
+    surprising existing deployments.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -218,27 +217,77 @@ class AudioPreprocessConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable audio pre-processing (band-limit and tail silence trimming)."
+            "Enable audio processing (silence trimming) prior to publishing payload events."
         ),
     )
-    sample_rate: int = Field(
-        default=16_000,
-        ge=8000,
-        description="Target sample rate (Hz) for processed audio",
+    silence_threshold_db: float = Field(
+        default=-50.0,
+        le=0.0,
+        description=(
+            "RMS threshold in decibels below which audio is considered silence for trimming."
+        ),
     )
-    mono: bool = Field(default=True, description="Downmix to mono if input is multi-channel")
-    highpass_hz: int = Field(
-        default=250, description="High-pass cutoff frequency (Hz) to remove rumble/squelch"
+    min_silence_duration_ms: NonNegativeInt = Field(
+        default=200,
+        description=(
+            "Minimum consecutive milliseconds below the threshold required "
+            "to classify a region as silence."
+        ),
     )
-    lowpass_hz: int = Field(
-        default=3400, description="Low-pass cutoff frequency (Hz) to match P25 voice band"
+    analysis_window_ms: NonNegativeInt = Field(
+        default=20,
+        ge=1,
+        description="Sliding window size in milliseconds for silence analysis",
     )
-    tail_silence_threshold_db: float = Field(
-        default=-35.0, description="Silence threshold (dB) for tail trimming"
-    )
-    tail_silence_min_ms: int = Field(
-        default=200, ge=0, description="Minimum trailing silence (ms) to trim from tail"
-    )
+
+    @classmethod
+    def from_environment(cls, *, env: Mapping[str, str] | None = None) -> AudioProcessingConfig:
+        """Construct a configuration from environment variables.
+
+        Recognised variables:
+            - ``AUDIO_PROCESSING_ENABLED`` controls the toggle (truthy values -> enabled)
+            - ``AUDIO_SILENCE_THRESHOLD_DB`` overrides the silence threshold (float)
+            - ``AUDIO_MIN_SILENCE_MS`` overrides the minimum silence duration (integer)
+            - ``AUDIO_ANALYSIS_WINDOW_MS`` overrides the analysis window size (integer)
+        """
+        source = dict(os.environ if env is None else env)
+        updates: _AudioProcessingOverrides = {}
+
+        enabled_raw = source.get("AUDIO_PROCESSING_ENABLED")
+        if enabled_raw is not None:
+            updates["enabled"] = enabled_raw.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+
+        threshold_raw = source.get("AUDIO_SILENCE_THRESHOLD_DB")
+        if threshold_raw is not None:
+            try:
+                updates["silence_threshold_db"] = float(threshold_raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "AUDIO_SILENCE_THRESHOLD_DB must be a floating point value"
+                ) from exc
+
+        min_silence_raw = source.get("AUDIO_MIN_SILENCE_MS")
+        if min_silence_raw is not None:
+            try:
+                parsed = int(min_silence_raw)
+            except ValueError as exc:
+                raise ValueError("AUDIO_MIN_SILENCE_MS must be an integer") from exc
+            updates["min_silence_duration_ms"] = parsed
+
+        window_raw = source.get("AUDIO_ANALYSIS_WINDOW_MS")
+        if window_raw is not None:
+            try:
+                parsed = int(window_raw)
+            except ValueError as exc:
+                raise ValueError("AUDIO_ANALYSIS_WINDOW_MS must be an integer") from exc
+            updates["analysis_window_ms"] = parsed
+
+        return cls(**updates)
 
 
 def load_credentials_from_environment(*, env: Mapping[str, str] | None = None) -> Credentials:
@@ -260,3 +309,12 @@ def load_credentials_from_environment(*, env: Mapping[str, str] | None = None) -
         missing = [key for key in ("LOGIN", "PASSWORD") if key not in resolved_env]
         raise ValueError(f"Missing credential keys: {', '.join(missing)}")
     return Credentials(username=username, password=password)
+
+
+class _AudioProcessingOverrides(TypedDict, total=False):
+    """TypedDict describing AudioProcessingConfig overrides."""
+
+    enabled: bool
+    silence_threshold_db: float
+    min_silence_duration_ms: int
+    analysis_window_ms: int

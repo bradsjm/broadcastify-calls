@@ -23,7 +23,7 @@
 
 ```
 broadcastify_client/
-├─ config.py            # Typed configuration schemas (credentials, headers, transcription, runtime tuning)
+├─ config.py            # Typed configuration schemas (credentials, headers, transcription, audio processing, runtime tuning)
 ├─ http.py              # Async HTTP client abstractions with browser header injection
 ├─ auth.py              # Async authentication/session lifecycle using http.py
 ├─ models.py            # Dataclasses / TypedDicts (Call, Events, Errors, Transcription artifacts)
@@ -173,7 +173,8 @@ class LiveCallEnvelope:
 
 - `AudioConsumer` subscribes to the `LiveCallEnvelope` queue and downloads each call audio asset once from Broadcastify’s calls CDN. The provider typically serves AAC in MP4/M4A (extension `m4a`).
 - An `AudioPayloadEvent` (usually a single final payload) is emitted with the response body and the server’s `Content-Type` header.
-- Chunks are published on `calls.audio.raw` and per-call channels `calls.audio.raw.{callId}` for downstream consumers (transcription, storage, analytics). No additional preprocessing or segmentation is performed in the current pipeline.
+- Optional post-processing is controlled via `AudioProcessingConfig`. When enabled, payloads pass through an `AudioProcessor` implementation (currently the no-op `NullAudioProcessor`, with PyAV trimming to follow) before publication.
+- Chunks are published on `calls.audio.raw` and per-call channels `calls.audio.raw.{callId}` for downstream consumers (transcription, storage, analytics).
 
 #### Event Topics & Ordering
 

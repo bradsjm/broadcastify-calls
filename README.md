@@ -38,6 +38,12 @@ locally hosted Whisper backend powered by the `faster-whisper` package.
 
 Dumping audio (`--dump-audio`) writes the raw payload fetched from Broadcastify without modification.
 
+## Audio Processing (Optional)
+
+- Disable by default; enable with `--audio-processing` or `AUDIO_PROCESSING_ENABLED=1`.
+- Trimming thresholds are configurable via CLI flags (`--audio-silence-threshold-db`, `--audio-min-silence-ms`, `--audio-analysis-window-ms`) or environment variables (`AUDIO_SILENCE_THRESHOLD_DB`, `AUDIO_MIN_SILENCE_MS`, `AUDIO_ANALYSIS_WINDOW_MS`).
+- The current implementation introduces configuration plumbing and processor interfaces in preparation for a PyAV-backed silence trimmer (Phase 2). When enabled today the pipeline still emits the original payload until trimming ships.
+
 ## Common Tasks
 
 | Task                   | Command                                                        |

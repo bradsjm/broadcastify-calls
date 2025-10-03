@@ -12,6 +12,7 @@ from .client import (
     TalkgroupSubscription,
 )
 from .config import (
+    AudioProcessingConfig,
     CacheConfig,
     Credentials,
     HttpClientConfig,
@@ -42,6 +43,7 @@ __all__ = [
     "ArchiveResult",
     "AsyncBroadcastifyClient",
     "AudioPayloadEvent",
+    "AudioProcessingConfig",
     "BroadcastifyClient",
     "BroadcastifyClientDependencies",
     "CacheConfig",
