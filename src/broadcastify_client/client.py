@@ -15,7 +15,7 @@ from uuid import uuid4
 from .archives import ArchiveClient, ArchiveParser, JsonArchiveParser
 from .audio_consumer import AudioConsumer
 from .audio_downloader_http import HttpAudioDownloader
-from .audio_processing import AudioProcessor, NullAudioProcessor
+from .audio_processing import AudioProcessingError, AudioProcessor, NullAudioProcessor
 from .auth import AuthenticationBackend, Authenticator, HttpAuthenticationBackend
 from .config import (
     AudioProcessingConfig,
@@ -58,6 +58,11 @@ from .telemetry import (
 from .transcription import TranscriptionBackend, TranscriptionPipeline
 from .transcription_local import LocalWhisperBackend
 from .transcription_openai import OpenAIWhisperBackend
+
+try:  # pragma: no cover - module import is optional for tests
+    from .audio_processing_pyav import PyAvSilenceTrimmer
+except ImportError:  # pragma: no cover - fallback when module unavailable at import time
+    PyAvSilenceTrimmer = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +352,8 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._audio_topic = "calls.audio"
         self._audio_raw_topic = "calls.audio.raw"
         self._transcript_final_topic = "transcription.complete"
+        self._pyav_warning_emitted = False
+        self._pyav_enabled_logged = False
         logger.debug("BroadcastifyClient initialised")
 
     def _create_transcription_backend(self) -> TranscriptionBackend:
@@ -361,7 +368,36 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         """Return an audio processor instance based on configured overrides."""
         if self._audio_processor_factory is not None:
             return self._audio_processor_factory()
-        return NullAudioProcessor()
+        if not self._audio_processing_config.enabled:
+            return NullAudioProcessor()
+        if PyAvSilenceTrimmer is None:
+            if not self._pyav_warning_emitted:
+                logger.warning(
+                    "Audio processing enabled but PyAV is not installed; "
+                    "install with `uv sync --group audio-processing` to activate trimming",
+                )
+                self._pyav_warning_emitted = True
+            return NullAudioProcessor()
+        try:
+            processor = PyAvSilenceTrimmer(
+                self._audio_processing_config,
+                logger=logger,
+            )
+        except AudioProcessingError as exc:
+            if not self._pyav_warning_emitted:
+                logger.warning("Audio processing disabled: %s", exc)
+                self._pyav_warning_emitted = True
+            return NullAudioProcessor()
+        if not self._pyav_enabled_logged:
+            cfg = self._audio_processing_config
+            logger.info(
+                "PyAV silence trimmer enabled (threshold=%.1f dB, min_silence=%d ms, window=%d ms)",
+                cfg.silence_threshold_db,
+                cfg.min_silence_duration_ms,
+                cfg.analysis_window_ms,
+            )
+            self._pyav_enabled_logged = True
+        return processor
 
     async def authenticate(self, credentials: Credentials | SessionToken) -> SessionToken:
         """Authenticate against Broadcastify and return a validated session token."""

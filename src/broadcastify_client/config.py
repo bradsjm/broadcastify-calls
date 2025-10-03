@@ -10,6 +10,15 @@ from typing import Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, NonNegativeInt, PositiveFloat
 
 
+class _AudioProcessingOverrides(TypedDict, total=False):
+    """Typed override map for :class:`AudioProcessingConfig` initialisation."""
+
+    enabled: bool
+    silence_threshold_db: float
+    min_silence_duration_ms: int
+    analysis_window_ms: int
+
+
 class Credentials(BaseModel):
     """Login credentials for Broadcastify authentication."""
 
@@ -140,7 +149,7 @@ class TranscriptionConfig(BaseModel):
         ),
     )
     device: str = Field(
-        default="auto",
+        default="cpu",
         description=(
             "Hardware device for local faster-whisper models (e.g. 'cpu', 'cuda', 'auto'). "
             "Ignored for remote providers."
@@ -309,12 +318,3 @@ def load_credentials_from_environment(*, env: Mapping[str, str] | None = None) -
         missing = [key for key in ("LOGIN", "PASSWORD") if key not in resolved_env]
         raise ValueError(f"Missing credential keys: {', '.join(missing)}")
     return Credentials(username=username, password=password)
-
-
-class _AudioProcessingOverrides(TypedDict, total=False):
-    """TypedDict describing AudioProcessingConfig overrides."""
-
-    enabled: bool
-    silence_threshold_db: float
-    min_silence_duration_ms: int
-    analysis_window_ms: int

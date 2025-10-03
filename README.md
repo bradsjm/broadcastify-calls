@@ -42,7 +42,8 @@ Dumping audio (`--dump-audio`) writes the raw payload fetched from Broadcastify 
 
 - Disable by default; enable with `--audio-processing` or `AUDIO_PROCESSING_ENABLED=1`.
 - Trimming thresholds are configurable via CLI flags (`--audio-silence-threshold-db`, `--audio-min-silence-ms`, `--audio-analysis-window-ms`) or environment variables (`AUDIO_SILENCE_THRESHOLD_DB`, `AUDIO_MIN_SILENCE_MS`, `AUDIO_ANALYSIS_WINDOW_MS`).
-- The current implementation introduces configuration plumbing and processor interfaces in preparation for a PyAV-backed silence trimmer (Phase 2). When enabled today the pipeline still emits the original payload until trimming ships.
+- Install PyAV by running `uv sync --group audio-processing` (or add the `audio-processing` optional dependency) to enable the silence trimmer. Without PyAV the client logs a warning and leaves payloads unchanged.
+- When the trimmer is active the client logs that the PyAV silence processor is enabled and reports trimming metrics at DEBUG level.
 
 ## Common Tasks
 

@@ -35,6 +35,9 @@ dependencies = [
 broadcastify_calls = "broadcastify_client.cli:main"
 
 [project.optional-dependencies]
+audio-processing = [
+    "av>=15.1.0",
+]
 telemetry = [
     "opentelemetry-instrumentation-httpx>=0.47b0",
     "opentelemetry-sdk>=1.28.0",
@@ -70,6 +73,10 @@ transcription = [
 transcription_local = [
     "av>=15.1.0",
     "faster-whisper>=1.0.0",
+]
+audio_processing = [
+    "av>=15.1.0",
+    "numpy>=2.3.3",
 ]
 
 [tool.ruff]
