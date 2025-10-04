@@ -6,8 +6,8 @@ import asyncio
 import importlib
 import logging
 from collections.abc import Callable
-from types import ModuleType
-from typing import Any
+from types import MethodType, ModuleType, SimpleNamespace
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -15,7 +15,7 @@ import pytest
 from broadcastify_client.audio_processing import AudioProcessingError, NullAudioProcessor
 from broadcastify_client.audio_processing_pyav import PyAvSilenceTrimmer
 from broadcastify_client.client import BroadcastifyClient, BroadcastifyClientDependencies
-from broadcastify_client.config import AudioProcessingConfig
+from broadcastify_client.config import AudioProcessingConfig, AudioProcessingStage
 from broadcastify_client.models import AudioPayloadEvent
 
 
@@ -29,7 +29,9 @@ def test_pyav_trimmer_requires_pyav(monkeypatch: pytest.MonkeyPatch) -> None:
         return original_import(name, package)
 
     monkeypatch.setattr(importlib, "import_module", _import)
-    cfg = AudioProcessingConfig(enabled=True)
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     with pytest.raises(AudioProcessingError) as excinfo:
         PyAvSilenceTrimmer(cfg)
     assert "PyAV" in str(excinfo.value)
@@ -41,7 +43,9 @@ def test_client_falls_back_when_pyav_missing(
     """Client falls back to the null processor and emits a warning when PyAV is missing."""
     monkeypatch.setattr("broadcastify_client.client.PyAvSilenceTrimmer", None)
 
-    cfg = AudioProcessingConfig(enabled=True)
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     caplog.set_level(logging.WARNING, logger="broadcastify_client.client")
     client = BroadcastifyClient(
         dependencies=BroadcastifyClientDependencies(audio_processing_config=cfg)
@@ -72,14 +76,18 @@ def test_client_logs_activation_when_pyav_available(
         raising=False,
     )
 
-    cfg = AudioProcessingConfig(enabled=True)
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     caplog.set_level(logging.INFO, logger="broadcastify_client.client")
     client = BroadcastifyClient(
         dependencies=BroadcastifyClientDependencies(audio_processing_config=cfg)
     )
     processor = client._create_audio_processor()  # pyright: ignore[reportPrivateUsage]
     assert isinstance(processor, FakeTrimmer)
-    assert any("PyAV silence trimmer enabled" in record.message for record in caplog.records)
+    assert any(
+        "PyAV audio processing enabled" in record.message for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -102,7 +110,9 @@ async def test_process_propagates_context_for_unexpected_errors(
     monkeypatch.setattr(PyAvSilenceTrimmer, "_process_sync", _boom)
 
     trimmer = object.__new__(PyAvSilenceTrimmer)
-    trimmer._config = AudioProcessingConfig(enabled=True)  # type: ignore[attr-defined]
+    trimmer._config = AudioProcessingConfig(  # type: ignore[attr-defined]
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     trimmer._logger = logging.getLogger("test.trimmer")  # type: ignore[attr-defined]
 
     event = AudioPayloadEvent(
@@ -174,7 +184,9 @@ def test_trimmer_uses_av_error_module(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(importlib, "import_module", _import)
 
-    cfg = AudioProcessingConfig(enabled=True)
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     trimmer = PyAvSilenceTrimmer(cfg)
 
     event = AudioPayloadEvent(
@@ -224,7 +236,7 @@ def test_encode_failures_include_cause(monkeypatch: pytest.MonkeyPatch) -> None:
             self.time_base = None
             self.bit_rate = 0
 
-        def encode(self, _frame: FakeAudioFrame) -> list[object]:
+        def encode(self, _frame: object) -> list[object]:
             raise FakeAVError("encoder boom")
 
     class FakeContainer:
@@ -262,7 +274,9 @@ def test_encode_failures_include_cause(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(importlib, "import_module", _import)
 
-    cfg = AudioProcessingConfig(enabled=True)
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM})
+    )
     trimmer = PyAvSilenceTrimmer(cfg)
 
     trimmed = trimmer._np.array([0.1, 0.2], dtype=trimmer._np.float32)  # type: ignore[attr-defined]
@@ -273,3 +287,127 @@ def test_encode_failures_include_cause(monkeypatch: pytest.MonkeyPatch) -> None:
     message = str(excinfo.value)
     assert "Failed to encode trimmed audio" in message
     assert "FakeAVError" in message
+
+
+def test_band_pass_disabled_when_filter_module_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Missing av.filter module disables the band-pass feature with a warning."""
+    original_import = importlib.import_module
+
+    class FakeAVError(Exception):
+        pass
+
+    fake_av = ModuleType("av")
+    fake_av.AVError = FakeAVError  # type: ignore[attr-defined]
+
+    def _import(name: str, package: str | None = None) -> Any:
+        if name == "av":
+            return fake_av
+        if name == "av.error":
+            mod = ModuleType("av.error")
+            mod.AVError = FakeAVError  # type: ignore[attr-defined]
+            return mod
+        if name == "av.filter":
+            raise ImportError("filter module not available")
+        return original_import(name, package)
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(importlib, "import_module", _import)
+
+    cfg = AudioProcessingConfig(
+        stages=frozenset({AudioProcessingStage.TRIM, AudioProcessingStage.BAND_PASS})
+    )
+    trimmer = PyAvSilenceTrimmer(cfg, logger=logging.getLogger("test.trimmer"))
+
+    assert trimmer._band_pass_enabled is False  # type: ignore[attr-defined]
+    assert any("Band-pass filter disabled" in record.message for record in caplog.records)
+
+
+def test_apply_band_pass_uses_filter_graph() -> None:
+    """Band-pass application drives the configured graph and returns filtered audio."""
+
+    class FakeAVError(Exception):
+        pass
+
+    class FakeBlockingError(Exception):
+        pass
+
+    class FakeFrame:
+        def __init__(self, data: np.ndarray) -> None:
+            self.data = data
+            self.pts: int | None = None
+
+    class FakeGraph:
+        instances: ClassVar[list[FakeGraph]] = []
+
+        def __init__(self) -> None:
+            self.__class__.instances.append(self)
+            self.abuffer_args: dict[str, Any] | None = None
+            self.added_filters: list[tuple[str, str | None]] = []
+            self.queue: list[FakeFrame] = []
+
+        def add(self, name: str, args: str | None = None) -> tuple[str, str | None]:
+            self.added_filters.append((name, args))
+            return (name, args)
+
+        def link_nodes(self, *_nodes: object) -> FakeGraph:
+            return self
+
+        def configure(self) -> FakeGraph:
+            return self
+
+        def push(self, frame: FakeFrame | None) -> None:
+            if frame is None:
+                return
+            scaled = FakeFrame(frame.data * 0.5)
+            self.queue.append(scaled)
+
+        def pull(self) -> FakeFrame:
+            if not self.queue:
+                raise FakeBlockingError()
+            return self.queue.pop(0)
+
+    fake_filter_module = SimpleNamespace(Graph=FakeGraph)
+
+    trimmer = object.__new__(PyAvSilenceTrimmer)
+    trimmer._config = AudioProcessingConfig(  # type: ignore[attr-defined]
+        stages=frozenset({AudioProcessingStage.TRIM, AudioProcessingStage.BAND_PASS})
+    )
+    trimmer._logger = logging.getLogger("test.trimmer")  # type: ignore[attr-defined]
+    trimmer._band_pass_enabled = True  # type: ignore[attr-defined]
+    trimmer._filter_module = fake_filter_module  # type: ignore[attr-defined]
+    trimmer._av = SimpleNamespace()  # type: ignore[attr-defined]
+    trimmer._np = np  # type: ignore[attr-defined]
+    trimmer._av_error_types = (FakeAVError,)  # type: ignore[attr-defined]
+    trimmer._blocking_errors = (FakeBlockingError,)  # type: ignore[attr-defined]
+    trimmer._eof_errors = ()  # type: ignore[attr-defined]
+    def _fake_frame_to_mono(_self: PyAvSilenceTrimmer, frame: FakeFrame) -> np.ndarray:
+        return frame.data
+
+    def _fake_create_audio_frame(
+        _self: PyAvSilenceTrimmer, chunk: Any, _sample_rate: int
+    ) -> FakeFrame:
+        return FakeFrame(np.asarray(chunk, dtype=np.float32))
+
+    trimmer._frame_to_mono = MethodType(_fake_frame_to_mono, trimmer)  # type: ignore[attr-defined]
+    trimmer._create_audio_frame = MethodType(  # type: ignore[attr-defined]
+        _fake_create_audio_frame,
+        trimmer,
+    )
+
+    audio = np.array([1.0, -0.5, 0.25], dtype=np.float32)
+    filtered = PyAvSilenceTrimmer._apply_band_pass(  # pyright: ignore[reportPrivateUsage]
+        trimmer,
+        audio,
+        sample_rate=48_000,
+    )
+
+    assert np.allclose(filtered, audio * 0.5)
+    graph = FakeGraph.instances.pop()
+    assert (
+        "abuffer",
+        "sample_rate=48000:sample_fmt=fltp:channel_layout=mono:time_base=1/48000",
+    ) in graph.added_filters
+    assert ("highpass", "f=250.0:poles=2") in graph.added_filters
+    assert ("lowpass", "f=3800.0:poles=2") in graph.added_filters

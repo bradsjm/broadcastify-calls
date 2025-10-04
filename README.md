@@ -40,8 +40,12 @@ Dumping audio (`--dump-audio`) writes the raw payload fetched from Broadcastify 
 
 ## Audio Processing (Optional)
 
-- Disable by default; enable with `--audio-processing` or `AUDIO_PROCESSING_ENABLED=1`.
+- Disable by default; enable stages with `--audio-processing` (e.g. `--audio-processing all`,
+  `--audio-processing trim,bandpass`) or set `AUDIO_PROCESSING=...`.
 - Trimming thresholds are configurable via CLI flags (`--audio-silence-threshold-db`, `--audio-min-silence-ms`, `--audio-analysis-window-ms`) or environment variables (`AUDIO_SILENCE_THRESHOLD_DB`, `AUDIO_MIN_SILENCE_MS`, `AUDIO_ANALYSIS_WINDOW_MS`).
+- When enabled, optional band-pass filtering attenuates content outside the 250–3800 Hz voice band. Toggle with `--audio-band-pass`/`AUDIO_BAND_PASS_ENABLED=1` and adjust cutoffs via `--audio-low-cut-hz`/`AUDIO_LOW_CUT_HZ` and `--audio-high-cut-hz`/`AUDIO_HIGH_CUT_HZ`.
+- A narrow notch filter (enabled by default) suppresses telemetry tones around 1 kHz; tune or disable it via `AUDIO_NOTCH_*` variables.
+- Post-filter RMS normalization (enabled by default) targets −20 dBFS with a 6 dB upward gain cap to stabilise transcription levels; configure it via `AUDIO_NORMALIZATION_*` variables.
 - Install PyAV by running `uv sync --group audio-processing` (or add the `audio-processing` optional dependency) to enable the silence trimmer. Without PyAV the client logs a warning and leaves payloads unchanged.
 - When the trimmer is active the client logs that the PyAV silence processor is enabled and reports trimming metrics at DEBUG level.
 

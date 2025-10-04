@@ -368,13 +368,20 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         """Return an audio processor instance based on configured overrides."""
         if self._audio_processor_factory is not None:
             return self._audio_processor_factory()
-        if not self._audio_processing_config.enabled:
+        if not self._audio_processing_config.stages:
             return NullAudioProcessor()
         if PyAvSilenceTrimmer is None:
             if not self._pyav_warning_emitted:
+                stage_names = ",".join(
+                    stage.value
+                    for stage in AudioProcessingConfig.ordered_stage_tuple(
+                        self._audio_processing_config.stages
+                    )
+                )
                 logger.warning(
-                    "Audio processing enabled but PyAV is not installed; "
-                    "install with `uv sync --group audio-processing` to activate trimming",
+                    "Audio processing requested for stages=%s but PyAV is not installed; "
+                    "install with `uv sync --group audio-processing` to activate processing",
+                    stage_names,
                 )
                 self._pyav_warning_emitted = True
             return NullAudioProcessor()
@@ -390,12 +397,23 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
             return NullAudioProcessor()
         if not self._pyav_enabled_logged:
             cfg = self._audio_processing_config
-            logger.info(
-                "PyAV silence trimmer enabled (threshold=%.1f dB, min_silence=%d ms, window=%d ms)",
-                cfg.silence_threshold_db,
-                cfg.min_silence_duration_ms,
-                cfg.analysis_window_ms,
+            stage_names = ",".join(
+                stage.value for stage in AudioProcessingConfig.ordered_stage_tuple(cfg.stages)
             )
+            logger.info("PyAV audio processing enabled (stages=%s)", stage_names)
+            if cfg.trim_enabled:
+                logger.info(
+                    "PyAV trim config: threshold=%.1f dB, min_silence=%d ms, window=%d ms",
+                    cfg.silence_threshold_db,
+                    cfg.min_silence_duration_ms,
+                    cfg.analysis_window_ms,
+                )
+            if cfg.band_pass_enabled:
+                logger.info(
+                    "PyAV band-pass config: %.0f-%.0f Hz",
+                    cfg.low_cut_hz,
+                    cfg.high_cut_hz,
+                )
             self._pyav_enabled_logged = True
         return processor
 
@@ -584,7 +602,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         )
         audio_consumer = self._audio_consumer_factory() if self._audio_consumer_factory else None
         audio_queue: asyncio.Queue[AudioPayloadEvent] | None = None
-        processing_enabled = self._audio_processing_config.enabled
+        processing_enabled = bool(self._audio_processing_config.stages)
 
         if audio_consumer is not None:
             audio_queue = asyncio.Queue(maxsize=config.queue_maxsize or 0)

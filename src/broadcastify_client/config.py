@@ -5,18 +5,43 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import Literal, TypedDict
+from enum import Enum
+from typing import ClassVar, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, NonNegativeInt, PositiveFloat
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    NonNegativeInt,
+    PositiveFloat,
+    model_validator,
+)
+
+
+class AudioProcessingStage(str, Enum):
+    """Represents an individual audio post-processing stage."""
+
+    TRIM = "trim"
+    BAND_PASS = "bandpass"  # noqa: S105
 
 
 class _AudioProcessingOverrides(TypedDict, total=False):
     """Typed override map for :class:`AudioProcessingConfig` initialisation."""
 
-    enabled: bool
+    stages: frozenset[AudioProcessingStage]
     silence_threshold_db: float
     min_silence_duration_ms: int
     analysis_window_ms: int
+    low_cut_hz: float
+    high_cut_hz: float
+    notch_enabled: bool
+    notch_center_hz: float
+    notch_q: float
+    notch_gain_db: float
+    normalization_enabled: bool
+    normalization_target_dbfs: float
+    normalization_max_gain_db: float
 
 
 class Credentials(BaseModel):
@@ -213,20 +238,34 @@ class TranscriptionConfig(BaseModel):
         )
 
 
-class AudioProcessingConfig(BaseModel):
-    """Configuration toggles for optional audio post-processing.
+def _empty_stage_set() -> frozenset[AudioProcessingStage]:
+    """Return an empty, typed stage selection."""
+    return frozenset()
 
-    The initial implementation focuses on trimming leading/trailing silence while keeping
-    Broadcastify's AAC containers intact. Processing remains disabled by default to avoid
-    surprising existing deployments.
-    """
+
+_FALSE_STRINGS: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool_flag(raw: str) -> bool:
+    """Interpret configuration flags accepting common "disabled" spellings."""
+    return raw.strip().lower() not in _FALSE_STRINGS
+
+
+class AudioProcessingConfig(BaseModel):
+    """Configuration toggles for optional audio post-processing stages."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    enabled: bool = Field(
-        default=False,
+    _ALL_STAGES: ClassVar[tuple[AudioProcessingStage, ...]] = (
+        AudioProcessingStage.TRIM,
+        AudioProcessingStage.BAND_PASS,
+    )
+
+    stages: frozenset[AudioProcessingStage] = Field(
+        default_factory=_empty_stage_set,
         description=(
-            "Enable audio processing (silence trimming) prior to publishing payload events."
+            "Enabled audio processing stages. Use an empty set for no processing or include "
+            "'trim' and/or 'bandpass'."
         ),
     )
     silence_threshold_db: float = Field(
@@ -248,53 +287,217 @@ class AudioProcessingConfig(BaseModel):
         ge=1,
         description="Sliding window size in milliseconds for silence analysis",
     )
+    low_cut_hz: PositiveFloat = Field(
+        default=250.0,
+        description=(
+            "Lower cutoff frequency (Hz) for the band-pass filter. Frequencies below this "
+            "threshold are attenuated."
+        ),
+    )
+    high_cut_hz: PositiveFloat = Field(
+        default=3800.0,
+        description=(
+            "Upper cutoff frequency (Hz) for the band-pass filter. Frequencies above this "
+            "threshold are attenuated."
+        ),
+    )
+    notch_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable a narrow notch to suppress persistent telemetry tones inside the voice band."
+        ),
+    )
+    notch_center_hz: PositiveFloat = Field(
+        default=1010.0,
+        description="Center frequency (Hz) of the applied notch filter when enabled.",
+    )
+    notch_q: PositiveFloat = Field(
+        default=35.0,
+        description=(
+            "Quality factor controlling notch bandwidth. Higher values yield a tighter notch."
+        ),
+    )
+    notch_gain_db: float = Field(
+        default=-25.0,
+        le=0.0,
+        description=(
+            "Gain applied at the notch center in dB. "
+            "Use negative values to attenuate telemetry tones."
+        ),
+    )
+    normalization_enabled: bool = Field(
+        default=True,
+        description=(
+            "Normalize post-filter levels toward a target RMS before handing audio to the "
+            "transcriber."
+        ),
+    )
+    normalization_target_dbfs: float = Field(
+        default=-20.0,
+        description=(
+            "Desired RMS level in dBFS for post-processed audio. Values must remain below 0 dBFS."
+        ),
+        lt=0.0,
+    )
+    normalization_max_gain_db: PositiveFloat = Field(
+        default=6.0,
+        description=(
+            "Maximum upward gain (dB) allowed during normalization to avoid exaggerating noise."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ensure_cutoff_bounds(self) -> AudioProcessingConfig:
+        """Validate frequency boundaries when band-pass filtering is enabled."""
+        if self.band_pass_enabled and self.low_cut_hz >= self.high_cut_hz:
+            msg = "low_cut_hz must be strictly less than high_cut_hz when bandpass is enabled"
+            raise ValueError(msg)
+        if self.band_pass_enabled and self.notch_enabled:
+            if self.notch_center_hz <= self.low_cut_hz or self.notch_center_hz >= self.high_cut_hz:
+                msg = (
+                    "notch_center_hz must fall within the band-pass range when the notch is enabled"
+                )
+                raise ValueError(msg)
+        return self
+
+    @property
+    def trim_enabled(self) -> bool:
+        """Return ``True`` when silence trimming is enabled."""
+        return AudioProcessingStage.TRIM in self.stages
+
+    @property
+    def band_pass_enabled(self) -> bool:
+        """Return ``True`` when band-pass filtering is enabled."""
+        return AudioProcessingStage.BAND_PASS in self.stages
+
+    @classmethod
+    def parse_stage_selection(cls, value: str) -> frozenset[AudioProcessingStage]:
+        """Parse a comma-separated stage selection string into a stage set."""
+        selector = value.strip().lower()
+        if not selector or selector in {"none", "off"}:
+            return frozenset()
+        if selector == "all":
+            return frozenset(cls._ALL_STAGES)
+        stages: set[AudioProcessingStage] = set()
+        for part in value.split(","):
+            item = part.strip().lower()
+            if not item:
+                raise ValueError("Audio processing selection contains an empty stage name")
+            if item in {AudioProcessingStage.TRIM.value, "trim"}:
+                stages.add(AudioProcessingStage.TRIM)
+                continue
+            if item in {AudioProcessingStage.BAND_PASS.value, "band-pass"}:
+                stages.add(AudioProcessingStage.BAND_PASS)
+                continue
+            raise ValueError(f"Unknown audio processing stage '{item}'")
+        return frozenset(stages)
+
+    @classmethod
+    def ordered_stage_tuple(
+        cls, stages: frozenset[AudioProcessingStage]
+    ) -> tuple[AudioProcessingStage, ...]:
+        """Return a tuple of *stages* respecting the canonical stage ordering."""
+        return tuple(stage for stage in cls._ALL_STAGES if stage in stages)
 
     @classmethod
     def from_environment(cls, *, env: Mapping[str, str] | None = None) -> AudioProcessingConfig:
         """Construct a configuration from environment variables.
 
         Recognised variables:
-            - ``AUDIO_PROCESSING_ENABLED`` controls the toggle (truthy values -> enabled)
+            - ``AUDIO_PROCESSING`` selects enabled stages (``all``, ``none``, or comma list)
             - ``AUDIO_SILENCE_THRESHOLD_DB`` overrides the silence threshold (float)
             - ``AUDIO_MIN_SILENCE_MS`` overrides the minimum silence duration (integer)
             - ``AUDIO_ANALYSIS_WINDOW_MS`` overrides the analysis window size (integer)
+            - ``AUDIO_LOW_CUT_HZ`` overrides the lower cutoff frequency (float)
+            - ``AUDIO_HIGH_CUT_HZ`` overrides the upper cutoff frequency (float)
+            - ``AUDIO_NOTCH_ENABLED`` toggles the telemetry notch filter (bool)
+            - ``AUDIO_NOTCH_CENTER_HZ`` overrides the notch center frequency (float)
+            - ``AUDIO_NOTCH_Q`` overrides the notch quality factor (float)
+            - ``AUDIO_NOTCH_GAIN_DB`` sets notch attenuation (float, negative for cuts)
+            - ``AUDIO_NORMALIZATION_ENABLED`` toggles RMS normalization (bool)
+            - ``AUDIO_NORMALIZATION_TARGET_DBFS`` sets the target RMS level (float, < 0)
+            - ``AUDIO_NORMALIZATION_MAX_GAIN_DB`` caps upward normalization gain (float)
         """
         source = dict(os.environ if env is None else env)
         updates: _AudioProcessingOverrides = {}
 
-        enabled_raw = source.get("AUDIO_PROCESSING_ENABLED")
-        if enabled_raw is not None:
-            updates["enabled"] = enabled_raw.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+        processing_raw = source.get("AUDIO_PROCESSING")
+        if processing_raw is not None:
+            updates["stages"] = cls.parse_stage_selection(processing_raw)
 
-        threshold_raw = source.get("AUDIO_SILENCE_THRESHOLD_DB")
-        if threshold_raw is not None:
-            try:
-                updates["silence_threshold_db"] = float(threshold_raw)
-            except ValueError as exc:
-                raise ValueError(
-                    "AUDIO_SILENCE_THRESHOLD_DB must be a floating point value"
-                ) from exc
+        float_overrides: dict[str, tuple[str, str]] = {
+            "AUDIO_SILENCE_THRESHOLD_DB": (
+                "silence_threshold_db",
+                "AUDIO_SILENCE_THRESHOLD_DB must be a floating point value",
+            ),
+            "AUDIO_LOW_CUT_HZ": (
+                "low_cut_hz",
+                "AUDIO_LOW_CUT_HZ must be a floating point value",
+            ),
+            "AUDIO_HIGH_CUT_HZ": (
+                "high_cut_hz",
+                "AUDIO_HIGH_CUT_HZ must be a floating point value",
+            ),
+            "AUDIO_NOTCH_CENTER_HZ": (
+                "notch_center_hz",
+                "AUDIO_NOTCH_CENTER_HZ must be a floating point value",
+            ),
+            "AUDIO_NOTCH_Q": (
+                "notch_q",
+                "AUDIO_NOTCH_Q must be a floating point value",
+            ),
+            "AUDIO_NOTCH_GAIN_DB": (
+                "notch_gain_db",
+                "AUDIO_NOTCH_GAIN_DB must be a floating point value",
+            ),
+            "AUDIO_NORMALIZATION_TARGET_DBFS": (
+                "normalization_target_dbfs",
+                "AUDIO_NORMALIZATION_TARGET_DBFS must be a floating point value",
+            ),
+            "AUDIO_NORMALIZATION_MAX_GAIN_DB": (
+                "normalization_max_gain_db",
+                "AUDIO_NORMALIZATION_MAX_GAIN_DB must be a floating point value",
+            ),
+        }
 
-        min_silence_raw = source.get("AUDIO_MIN_SILENCE_MS")
-        if min_silence_raw is not None:
+        for env_key, (field, error_message) in float_overrides.items():
+            raw = source.get(env_key)
+            if raw is None:
+                continue
             try:
-                parsed = int(min_silence_raw)
+                updates[field] = float(raw)
             except ValueError as exc:
-                raise ValueError("AUDIO_MIN_SILENCE_MS must be an integer") from exc
-            updates["min_silence_duration_ms"] = parsed
+                raise ValueError(error_message) from exc
 
-        window_raw = source.get("AUDIO_ANALYSIS_WINDOW_MS")
-        if window_raw is not None:
+        int_overrides: dict[str, tuple[str, str]] = {
+            "AUDIO_MIN_SILENCE_MS": (
+                "min_silence_duration_ms",
+                "AUDIO_MIN_SILENCE_MS must be an integer",
+            ),
+            "AUDIO_ANALYSIS_WINDOW_MS": (
+                "analysis_window_ms",
+                "AUDIO_ANALYSIS_WINDOW_MS must be an integer",
+            ),
+        }
+
+        for env_key, (field, error_message) in int_overrides.items():
+            raw = source.get(env_key)
+            if raw is None:
+                continue
             try:
-                parsed = int(window_raw)
+                updates[field] = int(raw)
             except ValueError as exc:
-                raise ValueError("AUDIO_ANALYSIS_WINDOW_MS must be an integer") from exc
-            updates["analysis_window_ms"] = parsed
+                raise ValueError(error_message) from exc
+
+        bool_overrides = {
+            "AUDIO_NOTCH_ENABLED": "notch_enabled",
+            "AUDIO_NORMALIZATION_ENABLED": "normalization_enabled",
+        }
+        for env_key, field in bool_overrides.items():
+            raw = source.get(env_key)
+            if raw is None:
+                continue
+            updates[field] = _parse_bool_flag(raw)
 
         return cls(**updates)
 

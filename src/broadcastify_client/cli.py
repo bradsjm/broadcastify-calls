@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from .client import BroadcastifyClient, BroadcastifyClientDependencies
 from .config import (
     AudioProcessingConfig,
+    AudioProcessingStage,
     Credentials,
     TranscriptionConfig,
     load_credentials_from_environment,
@@ -38,6 +39,67 @@ LOG_LEVELS: Final[dict[str, int]] = {
     "INFO": logging.INFO,
     "DEBUG": logging.DEBUG,
 }
+
+
+def _add_audio_processing_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--audio-processing",
+        type=str,
+        default=None,
+        help=(
+            "Audio processing stages to enable: 'all', 'none', or a comma-separated list "
+            "containing 'trim' and/or 'bandpass'."
+        ),
+    )
+    parser.add_argument(
+        "--audio-silence-threshold-db",
+        type=float,
+        default=None,
+        help="Silence detection threshold in dB (default: -50)",
+    )
+    parser.add_argument(
+        "--audio-min-silence-ms",
+        type=int,
+        default=None,
+        help="Minimum silence duration in milliseconds (default: 200)",
+    )
+    parser.add_argument(
+        "--audio-analysis-window-ms",
+        type=int,
+        default=None,
+        help="Analysis window size in milliseconds (default: 20)",
+    )
+    parser.add_argument(
+        "--audio-low-cut-hz",
+        type=float,
+        default=None,
+        help="Lower cutoff frequency for band-pass filtering (default: 250 Hz)",
+    )
+    parser.add_argument(
+        "--audio-high-cut-hz",
+        type=float,
+        default=None,
+        help="Upper cutoff frequency for band-pass filtering (default: 3800 Hz)",
+    )
+
+
+def _validate_audio_processing_args(
+    parser: argparse.ArgumentParser, namespace: argparse.Namespace
+) -> None:
+    if namespace.audio_min_silence_ms is not None and namespace.audio_min_silence_ms < 0:
+        parser.error("--audio-min-silence-ms must be zero or positive")
+    if namespace.audio_analysis_window_ms is not None and namespace.audio_analysis_window_ms <= 0:
+        parser.error("--audio-analysis-window-ms must be greater than zero")
+    if namespace.audio_low_cut_hz is not None and namespace.audio_low_cut_hz <= 0:
+        parser.error("--audio-low-cut-hz must be greater than zero")
+    if namespace.audio_high_cut_hz is not None and namespace.audio_high_cut_hz <= 0:
+        parser.error("--audio-high-cut-hz must be greater than zero")
+    if (
+        namespace.audio_low_cut_hz is not None
+        and namespace.audio_high_cut_hz is not None
+        and namespace.audio_low_cut_hz >= namespace.audio_high_cut_hz
+    ):
+        parser.error("--audio-low-cut-hz must be less than --audio-high-cut-hz")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +120,13 @@ class CliOptions:
     transcription: bool
     dump_audio: bool = field(default=False)
     dump_audio_dir: Path | None = field(default=None)
-    audio_processing: bool = field(default=False)
+    audio_processing_stages: tuple[AudioProcessingStage, ...] = field(default_factory=tuple)
+    audio_processing_cli_provided: bool = field(default=False)
     audio_silence_threshold_db: float | None = field(default=None)
     audio_min_silence_ms: int | None = field(default=None)
     audio_analysis_window_ms: int | None = field(default=None)
+    audio_low_cut_hz: float | None = field(default=None)
+    audio_high_cut_hz: float | None = field(default=None)
 
 
 async def run_async(options: CliOptions) -> int:
@@ -218,29 +283,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
             "respects OPENAI_BASE_URL)"
         ),
     )
-    parser.add_argument(
-        "--audio-processing",
-        action="store_true",
-        help="Enable optional audio post-processing (silence trimming)",
-    )
-    parser.add_argument(
-        "--audio-silence-threshold-db",
-        type=float,
-        default=None,
-        help="Silence detection threshold in dB (default: -50)",
-    )
-    parser.add_argument(
-        "--audio-min-silence-ms",
-        type=int,
-        default=None,
-        help="Minimum silence duration in milliseconds (default: 200)",
-    )
-    parser.add_argument(
-        "--audio-analysis-window-ms",
-        type=int,
-        default=None,
-        help="Analysis window size in milliseconds (default: 20)",
-    )
+    _add_audio_processing_arguments(parser)
     parser.add_argument(
         "--dump-audio",
         action="store_true",
@@ -263,10 +306,18 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         parser.error("--metadata-limit must be zero or positive")
     if namespace.history < 0:
         parser.error("--history must be zero or positive")
-    if namespace.audio_min_silence_ms is not None and namespace.audio_min_silence_ms < 0:
-        parser.error("--audio-min-silence-ms must be zero or positive")
-    if namespace.audio_analysis_window_ms is not None and namespace.audio_analysis_window_ms <= 0:
-        parser.error("--audio-analysis-window-ms must be greater than zero")
+    _validate_audio_processing_args(parser, namespace)
+
+    raw_processing = cast(str | None, getattr(namespace, "audio_processing", None))
+    audio_processing_cli_provided = raw_processing is not None
+    if raw_processing is None:
+        stage_tuple: tuple[AudioProcessingStage, ...] = ()
+    else:
+        try:
+            stage_set = AudioProcessingConfig.parse_stage_selection(raw_processing)
+        except ValueError as exc:
+            parser.error(str(exc))
+        stage_tuple = AudioProcessingConfig.ordered_stage_tuple(stage_set)
 
     # Validate mutually exclusive modes
     playlist_id: str | None = namespace.playlist_id
@@ -301,10 +352,13 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         transcription=bool(getattr(namespace, "transcription", False)),
         dump_audio=dump_audio_requested,
         dump_audio_dir=resolved_dump_dir,
-        audio_processing=bool(getattr(namespace, "audio_processing", False)),
+        audio_processing_stages=stage_tuple,
+        audio_processing_cli_provided=audio_processing_cli_provided,
         audio_silence_threshold_db=cast(float | None, namespace.audio_silence_threshold_db),
         audio_min_silence_ms=cast(int | None, namespace.audio_min_silence_ms),
         audio_analysis_window_ms=cast(int | None, namespace.audio_analysis_window_ms),
+        audio_low_cut_hz=cast(float | None, namespace.audio_low_cut_hz),
+        audio_high_cut_hz=cast(float | None, namespace.audio_high_cut_hz),
     )
 
 
@@ -375,15 +429,19 @@ def resolve_audio_processing_config(
     except ValueError as exc:
         raise ValueError(f"invalid audio processing environment configuration: {exc}") from exc
 
-    updates: dict[str, bool | float | int] = {}
-    if options.audio_processing:
-        updates["enabled"] = True
-    if options.audio_silence_threshold_db is not None:
-        updates["silence_threshold_db"] = options.audio_silence_threshold_db
-    if options.audio_min_silence_ms is not None:
-        updates["min_silence_duration_ms"] = options.audio_min_silence_ms
-    if options.audio_analysis_window_ms is not None:
-        updates["analysis_window_ms"] = options.audio_analysis_window_ms
+    updates: dict[str, object] = {}
+
+    if options.audio_processing_cli_provided:
+        updates["stages"] = frozenset(options.audio_processing_stages)
+
+    numeric_overrides = {
+        "silence_threshold_db": options.audio_silence_threshold_db,
+        "min_silence_duration_ms": options.audio_min_silence_ms,
+        "analysis_window_ms": options.audio_analysis_window_ms,
+        "low_cut_hz": options.audio_low_cut_hz,
+        "high_cut_hz": options.audio_high_cut_hz,
+    }
+    updates.update({key: value for key, value in numeric_overrides.items() if value is not None})
 
     if updates:
         try:
@@ -392,17 +450,35 @@ def resolve_audio_processing_config(
             errors = ", ".join(error.get("msg", "invalid value") for error in exc.errors())
             raise ValueError(f"invalid audio processing override: {errors}") from exc
 
-    if cfg.enabled:
-        logger.info(
-            "Audio processing enabled (threshold=%.1f dB, min_silence=%d ms, window=%d ms)",
-            cfg.silence_threshold_db,
-            cfg.min_silence_duration_ms,
-            cfg.analysis_window_ms,
-        )
+    if cfg.stages:
+        _log_audio_processing_details(cfg, logger)
     else:
         logger.debug("Audio processing disabled")
 
     return cfg
+
+
+def _log_audio_processing_details(
+    cfg: AudioProcessingConfig, logger: logging.Logger
+) -> None:
+    """Emit structured log lines describing the active audio processing configuration."""
+    stage_names = ",".join(
+        stage.value for stage in AudioProcessingConfig.ordered_stage_tuple(cfg.stages)
+    )
+    logger.info("Audio processing enabled (stages=%s)", stage_names)
+    if cfg.trim_enabled:
+        logger.info(
+            "Audio trim config: threshold=%.1f dB, min_silence=%d ms, window=%d ms",
+            cfg.silence_threshold_db,
+            cfg.min_silence_duration_ms,
+            cfg.analysis_window_ms,
+        )
+    if cfg.band_pass_enabled:
+        logger.info(
+            "Audio band-pass config: %.0f-%.0f Hz",
+            cfg.low_cut_hz,
+            cfg.high_cut_hz,
+        )
 
 
 def _build_client(

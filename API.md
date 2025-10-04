@@ -173,7 +173,11 @@ class LiveCallEnvelope:
 
 - `AudioConsumer` subscribes to the `LiveCallEnvelope` queue and downloads each call audio asset once from Broadcastify’s calls CDN. The provider typically serves AAC in MP4/M4A (extension `m4a`).
 - An `AudioPayloadEvent` (usually a single final payload) is emitted with the response body and the server’s `Content-Type` header.
-- Optional post-processing is controlled via `AudioProcessingConfig`. When enabled, payloads pass through an `AudioProcessor` implementation (PyAV-backed silence trimming when the `audio-processing` extra is installed, otherwise the no-op `NullAudioProcessor`) before publication. The client logs a warning when configuration requests trimming but PyAV is unavailable.
+- Optional post-processing is controlled via `AudioProcessingConfig`. Stages are selected via
+  the `--audio-processing` CLI flag (or the `AUDIO_PROCESSING` environment variable) and
+  currently include silence trimming and an optional band-pass filter. Payloads pass through a
+  PyAV-backed processor when stages are requested; otherwise the no-op `NullAudioProcessor` is
+  used. The client logs a warning when PyAV is unavailable for requested processing stages.
 - Chunks are published on `calls.audio.raw` and per-call channels `calls.audio.raw.{callId}` for downstream consumers (transcription, storage, analytics).
 
 #### Event Topics & Ordering
