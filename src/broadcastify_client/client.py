@@ -341,9 +341,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
         self._playlist_catalog = deps.playlist_catalog
         self._discovery_client = deps.discovery_client
         self._transcription_config = deps.transcription_config or TranscriptionConfig()
-        self._audio_processing_config = (
-            deps.audio_processing_config or AudioProcessingConfig()
-        )
+        self._audio_processing_config = deps.audio_processing_config or AudioProcessingConfig()
         self._transcription_pipeline: TranscriptionPipeline | None = None
         self._producer_handles: dict[str, ProducerHandle] = {}
         self._handles_lock = asyncio.Lock()
@@ -743,46 +741,42 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                 event = await queue.get()
                 try:
                     await self._event_bus.publish(self._audio_raw_topic, event)
-                    await self._event_bus.publish(
-                        f"{self._audio_raw_topic}.{event.call_id}", event
-                    )
+                    await self._event_bus.publish(f"{self._audio_raw_topic}.{event.call_id}", event)
                     await self._event_bus.publish(self._audio_topic, event)
-                    await self._event_bus.publish(
-                        f"{self._audio_topic}.{event.call_id}", event
-                    )
+                    await self._event_bus.publish(f"{self._audio_topic}.{event.call_id}", event)
 
                     if self._transcription_pipeline is not None and event.finished:
                         pipeline = self._transcription_pipeline
 
-                        async def _finalize(
+                        async def _finalize_and_dispatch(
                             call: CallId,
                             payload_event: AudioPayloadEvent,
                             p: TranscriptionPipeline,
                         ) -> None:
-                            async def _one() -> AsyncIterator[AudioPayloadEvent]:
+                            async def _single_event_stream() -> AsyncIterator[AudioPayloadEvent]:
                                 yield payload_event
 
                             try:
-                                result = await p.transcribe_final(_one())
+                                async for result in p.transcribe_final(_single_event_stream()):
+                                    await self._event_bus.publish(
+                                        self._transcript_final_topic,
+                                        TranscriptionResult(
+                                            call_id=call,
+                                            text=result.text,
+                                            language=result.language,
+                                            average_logprob=result.average_logprob,
+                                            segments=result.segments,
+                                            segment_id=result.segment_id,
+                                            total_segments=result.total_segments,
+                                            segment_start_time=result.segment_start_time,
+                                        ),
+                                    )
                             except TranscriptionError as exc:
-                                logger.error(
-                                    "Transcription failed for call %s: %s", call, exc
-                                )
+                                logger.error("Transcription failed for call %s: %s", call, exc)
                                 return
 
-                            await self._event_bus.publish(
-                                self._transcript_final_topic,
-                                TranscriptionResult(
-                                    call_id=call,
-                                    text=result.text,
-                                    language=result.language,
-                                    average_logprob=result.average_logprob,
-                                    segments=result.segments,
-                                ),
-                            )
-
                         finalize_task = asyncio.create_task(
-                            _finalize(event.call_id, event, pipeline)
+                            _finalize_and_dispatch(event.call_id, event, pipeline)
                         )
 
                         def _remove(task: asyncio.Task[None]) -> None:
@@ -791,9 +785,7 @@ class BroadcastifyClient(AsyncBroadcastifyClient):
                         handle.audio_tasks.add(finalize_task)
                         finalize_task.add_done_callback(_remove)
                 except Exception as exc:
-                    logger.exception(
-                        "Failed to dispatch audio payload for call %s", event.call_id
-                    )
+                    logger.exception("Failed to dispatch audio payload for call %s", event.call_id)
                     system_id = -1
                     talkgroup_id = -1
                     subscription = handle.subscription

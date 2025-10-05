@@ -193,13 +193,16 @@ class AudioPayloadEvent:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptionResult:
-    """Represents the completed transcription for a call."""
+    """Represents the completed transcription for a call or segment."""
 
     call_id: CallId
     text: str
     language: str
     average_logprob: float | None
     segments: Sequence[str]
+    segment_id: int | None = None
+    total_segments: int | None = None
+    segment_start_time: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

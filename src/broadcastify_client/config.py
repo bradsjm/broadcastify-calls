@@ -215,6 +215,23 @@ class TranscriptionConfig(BaseModel):
             "transcription provider. Batches below this threshold are skipped."
         ),
     )
+    whisper_segmentation_enabled: bool = Field(
+        default=True,
+        description="Enable splitting audio by silence for improved Whisper transcription",
+    )
+    whisper_segment_min_duration_ms: NonNegativeInt = Field(
+        default=1000, description="Minimum duration in ms for Whisper audio segments"
+    )
+    whisper_segment_max_silence_ms: NonNegativeInt = Field(
+        default=500, description="Maximum silence duration in ms to split within for Whisper"
+    )
+    whisper_segment_min_silence_ms: NonNegativeInt = Field(
+        default=200,
+        description="Minimum silence duration in ms to consider for Whisper segmentation",
+    )
+    whisper_silence_threshold_db: float = Field(
+        default=-40.0, description="Silence threshold in dB for Whisper segmentation"
+    )
 
     @classmethod
     def from_environment(cls, *, env: Mapping[str, str] | None = None) -> TranscriptionConfig:

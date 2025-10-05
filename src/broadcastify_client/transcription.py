@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 class TranscriptionBackend(Protocol):
     """Protocol implemented by transcription service integrations (final-only)."""
 
-    async def finalize(
+    def finalize(
         self, audio_stream: AsyncIterator[AudioPayloadEvent]
-    ) -> TranscriptionResult:  # pragma: no cover - protocol
-        """Return the final transcription result for the provided audio stream."""
+    ) -> AsyncIterator[TranscriptionResult]:  # pragma: no cover - protocol
+        """Yield transcription results for the provided audio stream."""
         ...
 
 
@@ -38,15 +38,17 @@ class TranscriptionPipeline:
 
     async def transcribe_final(
         self, audio_stream: AsyncIterator[AudioPayloadEvent]
-    ) -> TranscriptionResult:
-        """Return the final transcription result for *audio_stream*.
+    ) -> AsyncIterator[TranscriptionResult]:
+        """Yield transcription results for *audio_stream*.
 
         The iterator typically yields a single :class:`AudioPayloadEvent` containing
-        the entire call audio payload.
+        the entire call audio payload, but may yield multiple results when segmentation
+        is enabled.
         """
         try:
             logger.debug("Starting final transcription")
-            return await self._backend.finalize(audio_stream)
+            async for result in self._backend.finalize(audio_stream):
+                yield result
         except TranscriptionError as exc:
             logger.error("Final transcription failed: %s", exc)
             raise

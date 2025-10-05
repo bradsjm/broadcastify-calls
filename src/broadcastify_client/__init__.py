@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from .audio_segmentation import (
+    AudioSegment,
+    AudioSegmentationError,
+    AudioSegmenter,
+)
 from .client import (
     AsyncBroadcastifyClient,
     BroadcastifyClient,
@@ -44,6 +49,9 @@ __all__ = [
     "AsyncBroadcastifyClient",
     "AudioPayloadEvent",
     "AudioProcessingConfig",
+    "AudioSegment",
+    "AudioSegmentationError",
+    "AudioSegmenter",
     "BroadcastifyClient",
     "BroadcastifyClientDependencies",
     "CacheConfig",
