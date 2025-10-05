@@ -209,7 +209,7 @@ jobs:
 
             - name: Build and inspect package
               id: build-package
-              uses: hynek/build-and-inspect-python-package@v2.9.0
+              uses: hynek/build-and-inspect-python-package@v2.13.0
 
             - name: Locate built wheel
               id: locate-wheel
