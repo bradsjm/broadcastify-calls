@@ -17,6 +17,13 @@ from broadcastify_client.models import AudioPayloadEvent, TranscriptionResult
 from broadcastify_client.transcription_local import LocalWhisperBackend
 from broadcastify_client.transcription_openai import OpenAIWhisperBackend
 
+# Test constants
+EXPECTED_DURATION = 5.5
+EXPECTED_SEGMENT_COUNT = 2
+EXPECTED_MIN_SEGMENT_DURATION_MS = 1000
+EXPECTED_TOTAL_SEGMENTS_THREE = 3
+EXPECTED_SEGMENT_START_TIME_FIVE = 5.0
+
 
 class TestAudioSegment:
     """Test the AudioSegment dataclass."""
@@ -30,7 +37,7 @@ class TestAudioSegment:
             segment_id=0,
             total_segments=2,
         )
-        assert segment.duration == 5.5
+        assert segment.duration == EXPECTED_DURATION
 
     def test_duration_zero_length(self) -> None:
         """Test duration calculation for zero-length segment."""
@@ -150,7 +157,7 @@ class TestAudioSegmenter:
         )
 
         segments = segmenter.segment_event(event)
-        assert len(segments) == 2
+        assert len(segments) == EXPECTED_SEGMENT_COUNT
         assert segments[0].segment_id == 0
         assert segments[1].segment_id == 1
 
@@ -203,9 +210,9 @@ class TestOpenAIWhisperBackendSegmentation:
         mock_openai.AsyncOpenAI.return_value = mock_client
         mock_import.import_module.return_value = mock_openai
 
-        backend = OpenAIWhisperBackend(config)
-        assert backend._config.whisper_segmentation_enabled is True
-        assert backend._config.whisper_segment_min_duration_ms == 1000
+        OpenAIWhisperBackend(config)
+        assert config.whisper_segmentation_enabled is True
+        assert config.whisper_segment_min_duration_ms == EXPECTED_MIN_SEGMENT_DURATION_MS
 
     @patch("broadcastify_client.transcription_openai.AudioSegmenter")
     @patch("broadcastify_client.transcription_openai.importlib")
@@ -263,24 +270,24 @@ class TestOpenAIWhisperBackendSegmentation:
             async def event_stream() -> AsyncIterator[AudioPayloadEvent]:
                 yield event
 
-            # Collect results
-            results = []
+            # Collect results with proper typing
+            results: list[TranscriptionResult] = []
             async for result in backend.finalize(event_stream()):
                 results.append(result)
 
             # Verify results
-            assert len(results) == 2
+            assert len(results) == EXPECTED_SEGMENT_COUNT
             assert results[0].call_id == "test-call"
             assert results[0].segment_id == 0
-            assert results[0].total_segments == 2
+            assert results[0].total_segments == EXPECTED_SEGMENT_COUNT
             assert results[0].text == "First segment text"
             assert results[0].segment_start_time == 0.0
 
             assert results[1].call_id == "test-call"
             assert results[1].segment_id == 1
-            assert results[1].total_segments == 2
+            assert results[1].total_segments == EXPECTED_SEGMENT_COUNT
             assert results[1].text == "Second segment text"
-            assert results[1].segment_start_time == 5.0
+            assert results[1].segment_start_time == EXPECTED_SEGMENT_START_TIME_FIVE
 
     @patch("broadcastify_client.transcription_openai.AudioSegmenter")
     @patch("broadcastify_client.transcription_openai.importlib")
@@ -316,8 +323,8 @@ class TestOpenAIWhisperBackendSegmentation:
             async def event_stream() -> AsyncIterator[AudioPayloadEvent]:
                 yield event
 
-            # Collect results
-            results = []
+            # Collect results with proper typing
+            results: list[TranscriptionResult] = []
             async for result in backend.finalize(event_stream()):
                 results.append(result)
 
@@ -368,8 +375,8 @@ class TestOpenAIWhisperBackendSegmentation:
             async def event_stream() -> AsyncIterator[AudioPayloadEvent]:
                 yield event
 
-            # Collect results
-            results = []
+            # Collect results with proper typing
+            results: list[TranscriptionResult] = []
             async for result in backend.finalize(event_stream()):
                 results.append(result)
 
@@ -404,9 +411,9 @@ class TestLocalWhisperBackendSegmentation:
         mock_whisper.WhisperModel = MagicMock()
         mock_import.import_module.return_value = mock_whisper
 
-        backend = LocalWhisperBackend(config)
-        assert backend._config.whisper_segmentation_enabled is True
-        assert backend._config.whisper_segment_min_duration_ms == 1000
+        LocalWhisperBackend(config)
+        assert config.whisper_segmentation_enabled is True
+        assert config.whisper_segment_min_duration_ms == EXPECTED_MIN_SEGMENT_DURATION_MS
 
     @patch("broadcastify_client.transcription_local.AudioSegmenter")
     @patch("broadcastify_client.transcription_local.importlib")
@@ -455,17 +462,17 @@ class TestLocalWhisperBackendSegmentation:
             async def event_stream() -> AsyncIterator[AudioPayloadEvent]:
                 yield event
 
-            # Collect results
-            results = []
+            # Collect results with proper typing
+            results: list[TranscriptionResult] = []
             async for result in backend.finalize(event_stream()):
                 results.append(result)
 
             # Verify results
             assert len(results) == 1
             assert results[0].call_id == "test-call"
+            assert results[0].text == "Segment transcription result"
             assert results[0].segment_id == 0
             assert results[0].total_segments == 1
-            assert results[0].text == "Segment transcription result"
             assert results[0].segment_start_time == 0.0
 
 
@@ -507,7 +514,8 @@ class TestIntegration:
             async def event_stream() -> AsyncIterator[AudioPayloadEvent]:
                 yield event
 
-            results = []
+            # Collect results with proper typing
+            results: list[TranscriptionResult] = []
             async for result in backend.finalize(event_stream()):
                 results.append(result)
 
@@ -532,8 +540,8 @@ class TestIntegration:
 
         assert result.call_id == "test-call"
         assert result.segment_id == 1
-        assert result.total_segments == 3
-        assert result.segment_start_time == 5.5
+        assert result.total_segments == EXPECTED_TOTAL_SEGMENTS_THREE
+        assert result.segment_start_time == EXPECTED_DURATION
         assert result.text == "Segment text"
 
     def test_transcription_result_without_segment_metadata(self) -> None:
@@ -595,7 +603,7 @@ async def test_pyav_frame_resampling_fix() -> None:
         # Mock container.decode to yield frames
         mock_container.decode.return_value = iter([MagicMock()])
 
-        mock_import.import_module.side_effect = lambda name: mock_av if name == "av" else mock_np
+        mock_import.import_module.side_effect = lambda name: mock_av if name == "av" else mock_np  # type: ignore[arg-type]
 
         segmenter = AudioSegmenter(config)
 
@@ -678,7 +686,7 @@ async def test_variable_frame_size_handling() -> None:
         # Mock container.decode to yield frames
         mock_container.decode.return_value = iter([MagicMock()])
 
-        mock_import.import_module.side_effect = lambda name: mock_av if name == "av" else mock_np
+        mock_import.import_module.side_effect = lambda name: mock_av if name == "av" else mock_np  # type: ignore[arg-type]
 
         segmenter = AudioSegmenter(config)
 
