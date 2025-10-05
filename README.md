@@ -974,6 +974,10 @@ src/broadcastify_client/
 | `AUDIO_LOW_CUT_HZ` | Low frequency cutoff for band-pass | 250 |
 | `AUDIO_HIGH_CUT_HZ` | High frequency cutoff for band-pass | 3800 |
 
+## Publishing
+
+For manual PyPI releases, follow the workflow outlined in `docs/RELEASING.md`.
+
 ## License
 
 MIT License - see LICENSE file for details.
