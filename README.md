@@ -21,10 +21,10 @@ graph TB
         end
 
         subgraph "Data Pipeline"
-            POLLER[Live Producer<br/>Polling Engine]
-            DOWNLOADER[Audio Consumer<br/>HTTP Downloader]
-            PROCESSOR[Audio Processor<br/>Silence/Filter/Normalize]
-            TRANSCRIBE[Transcription Pipeline<br/>Whisper/OpenAI]
+            POLLER[Live Producer Polling Engine]
+            DOWNLOADER[Audio Consumer HTTP Downloader]
+            PROCESSOR[Audio Processor Silence/Filter/Normalize]
+            TRANSCRIBE[Transcription Pipeline Whisper/OpenAI]
         end
     end
 
@@ -218,36 +218,36 @@ async def main():
         password="your_password"
         # or api_key="your_api_key"
     )
-    
+
     # Create client
     client = BroadcastifyClient()
-    
+
     try:
         # Authenticate
         await client.authenticate(credentials)
-        
+
         # Create live producer for specific talkgroup
         handle = await client.create_live_producer(
             system_id=123,
             talkgroup_id=456
         )
-        
+
         # Register event handlers before starting
         @client.register_consumer("calls.audio")
         async def handle_audio(event):
             print(f"Received audio for call: {event.call_id}")
             # Process audio payload here
-            
+
         @client.register_consumer("transcription.complete")
         async def handle_transcription(result):
             print(f"Transcription: {result.text}")
-            
+
         # Start the client
         await client.start()
-        
+
         # Keep running
         await asyncio.Event().wait()
-        
+
     finally:
         await client.shutdown()
 
@@ -308,7 +308,7 @@ async def on_audio_payload(event: AudioPayloadEvent) -> None:
     print(f"Audio received: {event.call_id}, size: {len(event.payload)} bytes")
     print(f"Content type: {event.content_type}")
     print(f"Audio range: {event.start_offset:.2f}s - {event.end_offset:.2f}s")
-    
+
 @client.register_consumer("transcription.complete")
 async def on_transcription_complete(result: TranscriptionResult) -> None:
     """Handle transcription results."""
@@ -316,7 +316,7 @@ async def on_transcription_complete(result: TranscriptionResult) -> None:
     print(f"Language: {result.language}")
     print(f"Average log probability: {result.average_logprob}")
     print(f"Segments: {len(result.segments)}")
-    
+
 @client.register_consumer("calls.live")
 async def on_call_metadata(envelope: LiveCallEnvelope) -> None:
     """Handle live call metadata updates."""
@@ -512,24 +512,24 @@ except BroadcastifyError as e:
 
 ```mermaid
 flowchart TD
-    INPUT[Raw AAC Audio<br/>from Broadcastify]
+    INPUT[Raw AAC Audio from Broadcastify]
 
     subgraph "Stage 1: Analysis"
-        ANALYZE[Analyze audio in<br/>configurable windows<br/>(default: 50ms)]
-        DETECT[Detect silence<br/>below threshold<br/>(default: -40dB)]
+        ANALYZE[Analyze audio in configurable windows (default: 50ms)]
+        DETECT[Detect silence below threshold (default: -40dB)]
     end
 
     subgraph "Stage 2: Filtering"
-        BANDPASS[Band-pass filter<br/>250-3800 Hz<br/>voice range]
-        NOTCH[Notch filter<br/>suppress telemetry<br/>tones ~1kHz]
+        BANDPASS[Band-pass filter 250-3800 Hz voice range]
+        NOTCH[Notch filter suppress telemetry tones ~1kHz]
     end
 
     subgraph "Stage 3: Processing"
-        TRIM[Silence trimming<br/>minimum duration<br/>(default: 500ms)]
-        NORMALIZE[RMS normalization<br/>target: -20 dBFS<br/>max gain: 6dB]
+        TRIM[Silence trimming minimum duration (default: 500ms)]
+        NORMALIZE[RMS normalization target: -20 dBFS max gain: 6dB]
     end
 
-    OUTPUT[Processed Audio<br/>Ready for transcription]
+    OUTPUT[Processed Audio Ready for transcription]
 
     INPUT --> ANALYZE
     ANALYZE --> DETECT
@@ -577,29 +577,29 @@ The library includes advanced audio segmentation functionality designed to optim
 
 ```mermaid
 flowchart TD
-    INPUT[AudioPayloadEvent<br/>AAC/M4A audio]
-    
+    INPUT[AudioPayloadEvent AAC/M4A audio]
+
     subgraph "Preprocessing"
-        DECODE[Decode to 16kHz mono<br/>using PyAV]
-        CONVERT[Convert to numpy array<br/>float32 normalized]
+        DECODE[Decode to 16kHz mono using PyAV]
+        CONVERT[Convert to numpy array float32 normalized]
     end
-    
+
     subgraph "Silence Detection"
-        WINDOW[Sliding window analysis<br/>20ms windows]
+        WINDOW[Sliding window analysis 20ms windows]
         RMS[Calculate RMS energy]
-        THRESHOLD[Compare to silence threshold<br/>default: -40dB]
+        THRESHOLD[Compare to silence threshold default: -40dB]
         BOUNDARY[Identify silence boundaries]
     end
-    
+
     subgraph "Segment Creation"
-        FILTER[Filter by duration constraints<br/>min: 1000ms, max: 10000ms]
+        FILTER[Filter by duration constraints min: 1000ms, max: 10000ms]
         SPLIT[Split at silence midpoints]
-        ENCODE[Re-encode each segment<br/>to AAC format]
+        ENCODE[Re-encode each segment to AAC format]
         METADATA[Add timing and segment info]
     end
-    
-    OUTPUT[AudioSegment sequence<br/>ready for transcription]
-    
+
+    OUTPUT[AudioSegment sequence ready for transcription]
+
     INPUT --> DECODE
     DECODE --> CONVERT
     CONVERT --> WINDOW
@@ -611,7 +611,7 @@ flowchart TD
     SPLIT --> ENCODE
     ENCODE --> METADATA
     METADATA --> OUTPUT
-    
+
     style DECODE fill:#e3f2fd
     style WINDOW fill:#e8f5e8
     style FILTER fill:#fff3e0
@@ -648,15 +648,15 @@ segmenter = AudioSegmenter(transcription_config)
 async def process_audio_event(event: AudioPayloadEvent) -> None:
     try:
         segments = segmenter.segment_event(event)
-        
+
         for segment in segments:
             print(f"Segment {segment.segment_id + 1}/{segment.total_segments}")
             print(f"Duration: {segment.duration:.2f}s")
             print(f"Range: {segment.start_offset:.2f}s - {segment.end_offset:.2f}s")
-            
+
             # Send segment for transcription
             # await transcribe_segment(segment)
-            
+
     except AudioSegmentationError as e:
         print(f"Segmentation failed: {e}")
 ```
@@ -676,36 +676,36 @@ class SegmentedTranscriptionPipeline:
     def __init__(self, transcription_config: TranscriptionConfig):
         self.segmenter = AudioSegmenter(transcription_config)
         self.transcription_config = transcription_config
-    
+
     async def process_with_segmentation(self, event: AudioPayloadEvent) -> list[TranscriptionResult]:
         """Process audio with automatic segmentation."""
         segments = self.segmenter.segment_event(event)
-        
+
         if len(segments) == 1:
             # No segmentation needed, process as single segment
             return [await self._transcribe_segment(segments[0])]
-        
+
         # Process segments in parallel
         results = await asyncio.gather(*[
             self._transcribe_segment(segment) for segment in segments
         ])
-        
+
         # Combine results maintaining order
         return self._combine_transcription_results(results, segments)
-    
+
     async def _transcribe_segment(self, segment: AudioSegment) -> TranscriptionResult:
         """Transcribe a single audio segment."""
         # Implementation would send segment to transcription provider
         pass
-    
+
     def _combine_transcription_results(
-        self, 
-        results: list[TranscriptionResult], 
+        self,
+        results: list[TranscriptionResult],
         segments: list[AudioSegment]
     ) -> list[TranscriptionResult]:
         """Combine segment results with proper timing information."""
         combined_results = []
-        
+
         for i, (result, segment) in enumerate(zip(results, segments)):
             # Adjust timing to be relative to original audio
             combined_result = TranscriptionResult(
@@ -719,7 +719,7 @@ class SegmentedTranscriptionPipeline:
                 segment_start_time=segment.start_offset
             )
             combined_results.append(combined_result)
-        
+
         return combined_results
 ```
 
@@ -778,7 +778,7 @@ except AudioSegmentationError as e:
 stateDiagram-v2
     [*] --> AudioReady
     AudioReady --> Segment: Check segmentation config
-    Segment --> Aggregate: Single segment or<br/>no segmentation
+    Segment --> Aggregate: Single segment or no segmentation
     Segment --> ProcessSegments: Multiple segments
     ProcessSegments --> Combine: All segments transcribed
     Aggregate --> Convert: Full audio available
@@ -799,17 +799,17 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
     START[Transcription Request]
-    
+
     subgraph "Provider Selection"
         AUTO{Auto mode?}
-        LOCAL{Local Whisper<br/>available?}
-        API_KEY{OpenAI API key<br/>configured?}
+        LOCAL{Local Whisper available?}
+        API_KEY{OpenAI API key configured?}
         USE_LOCAL[Use faster-whisper]
         USE_OPENAI[Use OpenAI Whisper]
         FALLBACK[Fallback to available]
-        ERROR[No transcription<br/>provider available]
+        ERROR[No transcription provider available]
     end
-    
+
     START --> AUTO
     AUTO -->|Yes| LOCAL
     AUTO -->|No| PROVIDER_CHECK{Explicit provider?}
@@ -817,12 +817,12 @@ flowchart TD
     LOCAL -->|No| API_KEY
     API_KEY -->|Yes| USE_OPENAI
     API_KEY -->|No| ERROR
-    
+
     PROVIDER_CHECK -->|local| USE_LOCAL
     PROVIDER_CHECK -->|openai| API_KEY
-    
+
     ERROR --> ERROR
-    
+
     style USE_LOCAL fill:#e8f5e8
     style USE_OPENAI fill:#e3f2fd
     style ERROR fill:#ffebee
@@ -868,39 +868,39 @@ uv run pytest -k "test_auth"  # Specific tests
 ```mermaid
 graph TB
     subgraph "Public API Layer"
-        INIT[__init__.py<br/>Public Exports]
-        CLIENT[client.py<br/>Main Facade]
-        CLI[cli.py<br/>Command Line]
+        INIT[__init__.py Public Exports]
+        CLIENT[client.py Main Facade]
+        CLI[cli.py Command Line]
     end
 
     subgraph "Configuration & Models"
-        CONFIG[config.py<br/>Config Models]
-        MODELS[models.py<br/>Data Models]
-        SCHEMAS[schemas.py<br/>JSON Schemas]
+        CONFIG[config.py Config Models]
+        MODELS[models.py Data Models]
+        SCHEMAS[schemas.py JSON Schemas]
     end
 
     subgraph "Core Services"
-        AUTH[auth.py<br/>Authentication]
-        LIVE[live_producer.py<br/>Live Polling]
-        ARCHIVES[archives.py<br/>Archive Access]
+        AUTH[auth.py Authentication]
+        LIVE[live_producer.py Live Polling]
+        ARCHIVES[archives.py Archive Access]
     end
 
     subgraph "Data Pipeline"
-        AUDIO_CONSUMER[audio_consumer.py<br/>Audio Download]
-        AUDIO_PROC[audio_processing.py<br/>Audio Processing]
-        AUDIO_PYAV[audio_processing_pyav.py<br/>PyAV Implementation]
-        TRANSCRIBE[transcription.py<br/>Transcription Interface]
-        TRANSCRIBE_LOCAL[transcription_local.py<br/>Local Whisper]
-        TRANSCRIBE_OPENAI[transcription_openai.py<br/>OpenAI Whisper]
+        AUDIO_CONSUMER[audio_consumer.py Audio Download]
+        AUDIO_PROC[audio_processing.py Audio Processing]
+        AUDIO_PYAV[audio_processing_pyav.py PyAV Implementation]
+        TRANSCRIBE[transcription.py Transcription Interface]
+        TRANSCRIBE_LOCAL[transcription_local.py Local Whisper]
+        TRANSCRIBE_OPENAI[transcription_openai.py OpenAI Whisper]
     end
 
     subgraph "Infrastructure"
-        EVENTBUS[eventbus.py<br/>Event System]
-        HTTP[http.py<br/>HTTP Client]
-        TELEMETRY[telemetry.py<br/>Observability]
-        CACHE[cache.py<br/>Caching Layer]
-        ERRORS[errors.py<br/>Error Types]
-        METADATA[metadata.py<br/>Parse Metadata]
+        EVENTBUS[eventbus.py Event System]
+        HTTP[http.py HTTP Client]
+        TELEMETRY[telemetry.py Observability]
+        CACHE[cache.py Caching Layer]
+        ERRORS[errors.py Error Types]
+        METADATA[metadata.py Parse Metadata]
     end
 
     INIT --> CLIENT
