@@ -21,10 +21,10 @@ graph TB
         end
 
         subgraph "Data Pipeline"
-            POLLER[Live Producer Polling Engine]
-            DOWNLOADER[Audio Consumer HTTP Downloader]
-            PROCESSOR[Audio Processor Silence/Filter/Normalize]
-            TRANSCRIBE[Transcription Pipeline Whisper/OpenAI]
+            POLLER[Live Producer<br/>Polling Engine]
+            DOWNLOADER[Audio Consumer<br/>HTTP Downloader]
+            PROCESSOR[Audio Processor<br/>Silence/Filter/Normalize]
+            TRANSCRIBE[Transcription Pipeline<br/>Whisper/OpenAI]
         end
     end
 
@@ -512,24 +512,24 @@ except BroadcastifyError as e:
 
 ```mermaid
 flowchart TD
-    INPUT[Raw AAC Audio from Broadcastify]
+    INPUT[Raw AAC Audio<br/>from Broadcastify]
 
     subgraph "Stage 1: Analysis"
-        ANALYZE[Analyze audio in configurable windows (default: 50ms)]
-        DETECT[Detect silence below threshold (default: -40dB)]
+        ANALYZE[Analyze audio in<br/>configurable windows]
+        DETECT[Detect silence<br/>below threshold]
     end
 
     subgraph "Stage 2: Filtering"
-        BANDPASS[Band-pass filter 250-3800 Hz voice range]
-        NOTCH[Notch filter suppress telemetry tones ~1kHz]
+        BANDPASS[Band-pass filter<br/>250-3800 Hz<br/>voice range]
+        NOTCH[Notch filter<br/>suppress telemetry<br/>tones ~1kHz]
     end
 
     subgraph "Stage 3: Processing"
-        TRIM[Silence trimming minimum duration (default: 500ms)]
-        NORMALIZE[RMS normalization target: -20 dBFS max gain: 6dB]
+        TRIM[Silence trimming<br/>minimum duration]
+        NORMALIZE[RMS normalization<br/>target: -20 dBFS<br/>max gain: 6dB]
     end
 
-    OUTPUT[Processed Audio Ready for transcription]
+    OUTPUT[Processed Audio<br/>Ready for transcription]
 
     INPUT --> ANALYZE
     ANALYZE --> DETECT
@@ -577,28 +577,28 @@ The library includes advanced audio segmentation functionality designed to optim
 
 ```mermaid
 flowchart TD
-    INPUT[AudioPayloadEvent AAC/M4A audio]
+    INPUT[AudioPayloadEvent<br/>AAC/M4A audio]
 
     subgraph "Preprocessing"
-        DECODE[Decode to 16kHz mono using PyAV]
-        CONVERT[Convert to numpy array float32 normalized]
+        DECODE[Decode to 16kHz mono<br/>using PyAV]
+        CONVERT[Convert to numpy array<br/>float32 normalized]
     end
 
     subgraph "Silence Detection"
-        WINDOW[Sliding window analysis 20ms windows]
+        WINDOW[Sliding window analysis<br/>20ms windows]
         RMS[Calculate RMS energy]
-        THRESHOLD[Compare to silence threshold default: -40dB]
+        THRESHOLD[Compare to silence threshold<br/>default: -40dB]
         BOUNDARY[Identify silence boundaries]
     end
 
     subgraph "Segment Creation"
-        FILTER[Filter by duration constraints min: 1000ms, max: 10000ms]
+        FILTER[Filter by duration constraints<br/>min: 1000ms, max: 10000ms]
         SPLIT[Split at silence midpoints]
-        ENCODE[Re-encode each segment to AAC format]
+        ENCODE[Re-encode each segment<br/>to AAC format]
         METADATA[Add timing and segment info]
     end
 
-    OUTPUT[AudioSegment sequence ready for transcription]
+    OUTPUT[AudioSegment sequence<br/>ready for transcription]
 
     INPUT --> DECODE
     DECODE --> CONVERT
@@ -778,7 +778,7 @@ except AudioSegmentationError as e:
 stateDiagram-v2
     [*] --> AudioReady
     AudioReady --> Segment: Check segmentation config
-    Segment --> Aggregate: Single segment or no segmentation
+    Segment --> Aggregate: Single segment or<br/>no segmentation
     Segment --> ProcessSegments: Multiple segments
     ProcessSegments --> Combine: All segments transcribed
     Aggregate --> Convert: Full audio available
@@ -802,12 +802,12 @@ flowchart TD
 
     subgraph "Provider Selection"
         AUTO{Auto mode?}
-        LOCAL{Local Whisper available?}
-        API_KEY{OpenAI API key configured?}
+        LOCAL{Local Whisper<br/>available?}
+        API_KEY{OpenAI API key<br/>configured?}
         USE_LOCAL[Use faster-whisper]
         USE_OPENAI[Use OpenAI Whisper]
         FALLBACK[Fallback to available]
-        ERROR[No transcription provider available]
+        ERROR[No transcription<br/>provider available]
     end
 
     START --> AUTO
@@ -868,39 +868,39 @@ uv run pytest -k "test_auth"  # Specific tests
 ```mermaid
 graph TB
     subgraph "Public API Layer"
-        INIT[__init__.py Public Exports]
-        CLIENT[client.py Main Facade]
-        CLI[cli.py Command Line]
+        INIT[__init__.py<br/>Public Exports]
+        CLIENT[client.py<br/>Main Facade]
+        CLI[cli.py<br/>Command Line]
     end
 
     subgraph "Configuration & Models"
-        CONFIG[config.py Config Models]
-        MODELS[models.py Data Models]
-        SCHEMAS[schemas.py JSON Schemas]
+        CONFIG[config.py<br/>Config Models]
+        MODELS[models.py<br/>Data Models]
+        SCHEMAS[schemas.py<br/>JSON Schemas]
     end
 
     subgraph "Core Services"
-        AUTH[auth.py Authentication]
-        LIVE[live_producer.py Live Polling]
-        ARCHIVES[archives.py Archive Access]
+        AUTH[auth.py<br/>Authentication]
+        LIVE[live_producer.py<br/>Live Polling]
+        ARCHIVES[archives.py<br/>Archive Access]
     end
 
     subgraph "Data Pipeline"
-        AUDIO_CONSUMER[audio_consumer.py Audio Download]
-        AUDIO_PROC[audio_processing.py Audio Processing]
-        AUDIO_PYAV[audio_processing_pyav.py PyAV Implementation]
-        TRANSCRIBE[transcription.py Transcription Interface]
-        TRANSCRIBE_LOCAL[transcription_local.py Local Whisper]
-        TRANSCRIBE_OPENAI[transcription_openai.py OpenAI Whisper]
+        AUDIO_CONSUMER[audio_consumer.py<br/>Audio Download]
+        AUDIO_PROC[audio_processing.py<br/>Audio Processing]
+        AUDIO_PYAV[audio_processing_pyav.py<br/>PyAV Implementation]
+        TRANSCRIBE[transcription.py<br/>Transcription Interface]
+        TRANSCRIBE_LOCAL[transcription_local.py<br/>Local Whisper]
+        TRANSCRIBE_OPENAI[transcription_openai.py<br/>OpenAI Whisper]
     end
 
     subgraph "Infrastructure"
-        EVENTBUS[eventbus.py Event System]
-        HTTP[http.py HTTP Client]
-        TELEMETRY[telemetry.py Observability]
-        CACHE[cache.py Caching Layer]
-        ERRORS[errors.py Error Types]
-        METADATA[metadata.py Parse Metadata]
+        EVENTBUS[eventbus.py<br/>Event System]
+        HTTP[http.py<br/>HTTP Client]
+        TELEMETRY[telemetry.py<br/>Observability]
+        CACHE[cache.py<br/>Caching Layer]
+        ERRORS[errors.py<br/>Error Types]
+        METADATA[metadata.py<br/>Parse Metadata]
     end
 
     INIT --> CLIENT
@@ -973,11 +973,6 @@ src/broadcastify_client/
 | `AUDIO_ANALYSIS_WINDOW_MS` | Analysis window size | 20 |
 | `AUDIO_LOW_CUT_HZ` | Low frequency cutoff for band-pass | 250 |
 | `AUDIO_HIGH_CUT_HZ` | High frequency cutoff for band-pass | 3800 |
-| **Audio Segmentation** | | |
-| `WHISPER_SEGMENT_MIN_DURATION_MS` | Minimum segment length for transcription | 1000 |
-| `WHISPER_SEGMENT_MAX_SILENCE_MS` | Maximum silence duration to split on | 10000 |
-| `WHISPER_SEGMENT_MIN_SILENCE_MS` | Minimum silence duration for valid split | 500 |
-| `WHISPER_SILENCE_THRESHOLD_DB` | Silence detection threshold for segmentation | -40 |
 
 ## License
 
