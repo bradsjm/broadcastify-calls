@@ -214,6 +214,7 @@ class TestOpenAIWhisperBackendSegmentation:
         assert config.whisper_segmentation_enabled is True
         assert config.whisper_segment_min_duration_ms == EXPECTED_MIN_SEGMENT_DURATION_MS
 
+    @pytest.mark.asyncio
     @patch("broadcastify_client.transcription_openai.AudioSegmenter")
     @patch("broadcastify_client.transcription_openai.importlib")
     async def test_finalize_with_segmentation_enabled(
@@ -289,13 +290,16 @@ class TestOpenAIWhisperBackendSegmentation:
             assert results[1].text == "Second segment text"
             assert results[1].segment_start_time == EXPECTED_SEGMENT_START_TIME_FIVE
 
+    @pytest.mark.asyncio
     @patch("broadcastify_client.transcription_openai.AudioSegmenter")
     @patch("broadcastify_client.transcription_openai.importlib")
     async def test_finalize_with_segmentation_disabled(
         self, mock_import: MagicMock, mock_segmenter_cls: MagicMock, config: TranscriptionConfig
     ) -> None:
         """Test finalize with segmentation disabled (legacy behavior)."""
-        config = config.model_copy(update={"whisper_segmentation_enabled": False})
+        config = config.model_copy(
+            update={"whisper_segmentation_enabled": False, "min_batch_bytes": 0}
+        )
 
         mock_openai = MagicMock()
         mock_client = MagicMock()
@@ -338,6 +342,7 @@ class TestOpenAIWhisperBackendSegmentation:
             # Verify segmenter was not called
             mock_segmenter_cls.assert_not_called()
 
+    @pytest.mark.asyncio
     @patch("broadcastify_client.transcription_openai.AudioSegmenter")
     @patch("broadcastify_client.transcription_openai.importlib")
     async def test_finalize_segmentation_failure_fallback(
@@ -355,6 +360,7 @@ class TestOpenAIWhisperBackendSegmentation:
         mock_openai.AsyncOpenAI.return_value = mock_client
         mock_import.import_module.return_value = mock_openai
 
+        config = config.model_copy(update={"min_batch_bytes": 0})
         backend = OpenAIWhisperBackend(config)
 
         # Mock the transcribe_bytes method
@@ -415,6 +421,7 @@ class TestLocalWhisperBackendSegmentation:
         assert config.whisper_segmentation_enabled is True
         assert config.whisper_segment_min_duration_ms == EXPECTED_MIN_SEGMENT_DURATION_MS
 
+    @pytest.mark.asyncio
     @patch("broadcastify_client.transcription_local.AudioSegmenter")
     @patch("broadcastify_client.transcription_local.importlib")
     async def test_finalize_with_segmentation_enabled(
@@ -487,6 +494,7 @@ class TestIntegration:
             provider="openai",
             api_key="test-key",
             whisper_segmentation_enabled=False,  # Disabled
+            min_batch_bytes=0,
         )
 
         mock_openai = MagicMock()
@@ -578,8 +586,8 @@ async def test_pyav_frame_resampling_fix() -> None:
         mock_np = MagicMock()
 
         # Mock numpy
-        mock_np.concatenate.return_value = MagicMock()
-        mock_np.sqrt.return_value = MagicMock()
+        mock_np.concatenate.return_value = _FakeArray([0.1, 0.2, 0.3])
+        mock_np.sqrt.return_value = 0.01
         mock_np.mean.return_value = 0.01
 
         # Mock PyAV container and stream
@@ -594,7 +602,7 @@ async def test_pyav_frame_resampling_fix() -> None:
         # Mock resampler that returns list of frames
         mock_resampler = MagicMock()
         mock_frame = MagicMock()
-        mock_frame.to_ndarray.return_value = MagicMock()
+        mock_frame.to_ndarray.return_value = _FakeArray([0.1, 0.2, 0.3])
         mock_resampler.resample.return_value = [mock_frame]  # Returns list
 
         # Mock AudioResampler
@@ -618,16 +626,19 @@ async def test_pyav_frame_resampling_fix() -> None:
             finished=True,
         )
 
-        # This should not raise AttributeError about list.to_ndarray
-        try:
-            segments = segmenter.segment_event(event)
-            # If we get here without exception, the fix worked
-            assert isinstance(segments, list)
-        except AttributeError as e:
-            if "list' object has no attribute 'to_ndarray'" in str(e):
-                pytest.fail("PyAV frame resampling fix failed: list.to_ndarray() error occurred")
-            else:
-                raise  # Re-raise if it's a different AttributeError
+        with patch.object(AudioSegmenter, "_encode_segment", return_value=b"segment"):
+            # This should not raise AttributeError about list.to_ndarray
+            try:
+                segments = segmenter.segment_event(event)
+                # If we get here without exception, the fix worked
+                assert isinstance(segments, list)
+            except AttributeError as e:
+                if "list' object has no attribute 'to_ndarray'" in str(e):
+                    pytest.fail(
+                        "PyAV frame resampling fix failed: list.to_ndarray() error occurred"
+                    )
+                else:
+                    raise  # Re-raise if it's a different AttributeError
 
 
 @pytest.mark.asyncio
@@ -647,19 +658,11 @@ async def test_variable_frame_size_handling() -> None:
         mock_np = MagicMock()
 
         # Create mock arrays with different sizes (like the real error)
-        array1 = MagicMock()
-        array1.ndim = 2
-        array1.shape = (1, 2016)  # 2016 samples
-        array1.flatten.return_value = MagicMock()
-
-        array2 = MagicMock()
-        array2.ndim = 2
-        array2.shape = (1, 2048)  # 2048 samples - different size!
-        array2.flatten.return_value = MagicMock()
+        array1 = _FakeArray([0.1] * 2016)
+        array2 = _FakeArray([0.1] * 2048)
 
         # Mock numpy concatenation to handle the variable sizes
-        concatenated_array = MagicMock()
-        concatenated_array.astype.return_value = MagicMock()
+        concatenated_array = _FakeArray([0.1] * 4000)
         mock_np.concatenate.return_value = concatenated_array
 
         # Mock PyAV container and stream
@@ -701,23 +704,24 @@ async def test_variable_frame_size_handling() -> None:
             finished=True,
         )
 
-        # This should not raise ValueError about mismatched array dimensions
-        try:
-            segments = segmenter.segment_event(event)
-            # If we get here without exception, the fix worked
-            assert isinstance(segments, list)
-            # Verify concatenate was called with flattened arrays
-            mock_np.concatenate.assert_called_once()
-            # The call should have been made with flattened arrays
-            call_args = mock_np.concatenate.call_args[0][0]
-            assert len(call_args) >= 1  # At least one frame array was processed
-        except ValueError as e:
-            if "all the input array dimensions" in str(e):
-                pytest.fail(
-                    "Variable frame size handling failed: array dimension mismatch error occurred"
-                )
-            else:
-                raise  # Re-raise if it's a different ValueError
+        with patch.object(AudioSegmenter, "_encode_segment", return_value=b"segment"):
+            # This should not raise ValueError about mismatched array dimensions
+            try:
+                segments = segmenter.segment_event(event)
+                # If we get here without exception, the fix worked
+                assert isinstance(segments, list)
+                # Verify concatenate was called with flattened arrays
+                mock_np.concatenate.assert_called_once()
+                # The call should have been made with flattened arrays
+                call_args = mock_np.concatenate.call_args[0][0]
+                assert len(call_args) >= 1  # At least one frame array was processed
+            except ValueError as e:
+                if "all the input array dimensions" in str(e):
+                    pytest.fail(
+                        "Variable frame size handling failed: array dimension mismatch"
+                    )
+                else:
+                    raise  # Re-raise if it's a different ValueError
 
 
 # Logging functionality is tested implicitly through integration tests
@@ -726,3 +730,42 @@ async def test_variable_frame_size_handling() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+class _FakeArray:
+    """Lightweight stand-in for numpy arrays used in segmentation tests."""
+
+    def __init__(self, data: list[float]) -> None:
+        self._data = data
+        self.ndim = 1
+
+    def flatten(self) -> _FakeArray:
+        return _FakeArray(list(self._data))
+
+    def __getitem__(self, item: slice | int) -> _FakeArray | float:
+        if isinstance(item, slice):
+            return _FakeArray(self._data[item])
+        return self._data[item]
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    def astype(self, _dtype: object) -> _FakeArray:
+        return _FakeArray(list(self._data))
+
+    def __truediv__(self, scalar: float) -> _FakeArray:
+        return _FakeArray([value / scalar for value in self._data])
+
+    def __mul__(self, other: object) -> _FakeArray:
+        if isinstance(other, _FakeArray):
+            return _FakeArray([a * b for a, b in zip(self._data, other._data, strict=False)])
+        if isinstance(other, (int, float)):
+            return _FakeArray([a * other for a in self._data])
+        return NotImplemented
+
+    def __rmul__(self, other: object) -> _FakeArray:
+        return self.__mul__(other)

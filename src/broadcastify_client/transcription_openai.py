@@ -73,13 +73,13 @@ class OpenAIWhisperBackend:
         if AsyncOpenAIClass is None:  # pragma: no cover - unexpected API surface
             raise TranscriptionError("openai.AsyncOpenAI not found in installed package")
 
-        # Instantiate the provider client and narrow the type to our protocol.
-        self._client = cast(OpenAIClientLike, AsyncOpenAIClass(**client_kwargs))
-        if not isinstance(self._client, OpenAIClientLike):  # type: ignore[arg-type]
-            # Best-effort guard; in practice AsyncOpenAI conforms.
+        # Instantiate the provider client and validate the minimal API surface.
+        client = AsyncOpenAIClass(**client_kwargs)
+        if not _supports_transcriptions_api(client):
             raise TranscriptionError("OpenAI client does not expose expected API surface")
+        self._client = cast(OpenAIClientLike, client)
 
-    # streaming partials removed
+        # streaming partials removed
 
     async def finalize(
         self, audio_stream: AsyncIterator[AudioPayloadEvent]
@@ -261,3 +261,20 @@ def _single_event_stream(event: AudioPayloadEvent) -> AsyncIterator[AudioPayload
         yield event
 
     return generator()
+
+
+def _supports_transcriptions_api(candidate: object) -> bool:
+    """Return ``True`` when *candidate* satisfies :class:`OpenAIClientLike`."""
+    if candidate is None:
+        return False
+
+    audio_ns = getattr(candidate, "audio", None)
+    if audio_ns is None:
+        return False
+
+    transcriptions = getattr(audio_ns, "transcriptions", None)
+    if transcriptions is None:
+        return False
+
+    create = getattr(transcriptions, "create", None)
+    return callable(create)

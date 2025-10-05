@@ -185,14 +185,14 @@ class RecordingTranscriptionBackend:
 
     async def finalize(
         self, audio_stream: AsyncIterator[AudioPayloadEvent]
-    ) -> TranscriptionResult:
-        """Collect the provided stream and return a canned result."""
+    ) -> AsyncIterator[TranscriptionResult]:
+        """Collect the provided stream and yield a canned result."""
         payloads: list[AudioPayloadEvent] = []
         async for payload in audio_stream:
             payloads.append(payload)
         self.requests.append(payloads)
         first_call = payloads[0].call_id if payloads else "unknown"
-        return TranscriptionResult(
+        yield TranscriptionResult(
             call_id=first_call,
             text="stub",
             language="en",
