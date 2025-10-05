@@ -18,6 +18,15 @@ from pydantic import (
     model_validator,
 )
 
+_DEFAULT_P25_INITIAL_PROMPT = (
+    "Transcribe trunked public safety P25 radio traffic. Use plain text sentences. "
+    "Retain unit identifiers, call signs, talkgroup names, and 10-codes exactly as spoken. "
+    "Speakers include police, fire, EMS, and dispatch operators coordinating incidents. "
+    "Recognise frequent terms such as TAC, Command, Engine, Medic, Ladder, BOLO, Code four, "
+    "10-4, 10-33, signal 100, and perimeter. "
+    "Expand spelled-out phonetics into complete words when unambiguous."
+)
+
 
 class AudioProcessingStage(str, Enum):
     """Represents an individual audio post-processing stage."""
@@ -191,6 +200,13 @@ class TranscriptionConfig(BaseModel):
         default="en",
         description="Optional BCP-47 language hint to pass to the provider",
     )
+    initial_prompt: str = Field(
+        default=_DEFAULT_P25_INITIAL_PROMPT,
+        description=(
+            "Domain-specific text priming remote transcribers with public safety context. "
+            "Overrides can introduce agency vocabulary or set an empty string to disable."
+        ),
+    )
     chunk_seconds: int = Field(
         default=10,
         ge=1,
@@ -246,12 +262,16 @@ class TranscriptionConfig(BaseModel):
         endpoint = source.get("OPENAI_BASE_URL")
         api_key = source.get("OPENAI_API_KEY")
         model = source.get("OPENAI_WHISPER_MODEL", "whisper-1")
+        initial_prompt = source.get("OPENAI_WHISPER_INITIAL_PROMPT")
         return cls(
             provider="openai",
             enabled=False,
             endpoint=HttpUrl(endpoint) if endpoint else None,
             api_key=api_key,
             model=model,
+            initial_prompt=(
+                initial_prompt if initial_prompt is not None else _DEFAULT_P25_INITIAL_PROMPT
+            ),
         )
 
 

@@ -11,7 +11,7 @@ import importlib
 import io
 import logging
 from collections.abc import AsyncIterator
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from .audio_segmentation import AudioSegment, AudioSegmentationError, AudioSegmenter
 from .config import TranscriptionConfig
@@ -228,13 +228,24 @@ class OpenAIWhisperBackend:
         filename = "audio.m4a"
 
         # Use the OpenAI audio transcriptions endpoint via the files API.
-        response = await self._client.audio.transcriptions.create(  # type: ignore[reportUnknownMemberType]
-            model=self._config.model,
-            file=(filename, io.BytesIO(data), "audio/mp4"),
-            language=self._config.language,
-        )
+        prompt = self._config.initial_prompt.strip()
+        create = cast(Any, self._client.audio.transcriptions.create)
+        response: object
+        if prompt:
+            response = await create(
+                model=self._config.model,
+                file=(filename, io.BytesIO(data), "audio/mp4"),
+                language=self._config.language,
+                prompt=prompt,
+            )
+        else:
+            response = await create(
+                model=self._config.model,
+                file=(filename, io.BytesIO(data), "audio/mp4"),
+                language=self._config.language,
+            )
 
-        text = getattr(response, "text", None)
+        text = getattr(cast(Any, response), "text", None)
         if not isinstance(text, str):
             raise TranscriptionError("Transcription provider response missing text")
         cleaned = text.strip()

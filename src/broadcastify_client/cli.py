@@ -413,6 +413,7 @@ def _resolve_transcription_config(
         return cfg
     if cfg.api_key:
         logger.info("Transcription enabled (provider=openai, model=%s)", cfg.model)
+        logger.info("Transcription initial prompt: %s", cfg.initial_prompt)
         return cfg.model_copy(update={"enabled": True})
     logger.warning(
         "--transcription requested but OPENAI_API_KEY not set; transcription disabled",
@@ -458,9 +459,7 @@ def resolve_audio_processing_config(
     return cfg
 
 
-def _log_audio_processing_details(
-    cfg: AudioProcessingConfig, logger: logging.Logger
-) -> None:
+def _log_audio_processing_details(cfg: AudioProcessingConfig, logger: logging.Logger) -> None:
     """Emit structured log lines describing the active audio processing configuration."""
     stage_names = ",".join(
         stage.value for stage in AudioProcessingConfig.ordered_stage_tuple(cfg.stages)

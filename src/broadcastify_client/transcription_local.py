@@ -205,22 +205,39 @@ class LocalWhisperBackend:
         if not payload:
             return ""
         model = await self._ensure_model()
+        prompt = self._config.initial_prompt.strip()
+        prompt_arg = prompt if prompt else None
         async with self._model_lock:
             try:
-                result = await asyncio.to_thread(self._transcribe_sync, model, payload)
+                result = await asyncio.to_thread(
+                    self._transcribe_sync,
+                    model,
+                    payload,
+                    prompt_arg,
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 raise TranscriptionError(f"Local Whisper transcription failed: {exc}") from exc
         return result
 
-    def _transcribe_sync(self, model: object, payload: bytes) -> str:
+    def _transcribe_sync(
+        self,
+        model: object,
+        payload: bytes,
+        prompt: str | None = None,
+    ) -> str:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
             tmp.write(payload)
             tmp.flush()
             try:
+                kwargs: dict[str, object] = {
+                    "language": self._config.language,
+                    "condition_on_previous_text": False,
+                }
+                if prompt:
+                    kwargs["initial_prompt"] = prompt
                 segments, _info = model.transcribe(  # type: ignore[attr-defined]
                     tmp.name,
-                    language=self._config.language,
-                    condition_on_previous_text=False,
+                    **kwargs,
                 )
             except AttributeError as exc:  # pragma: no cover - unexpected API surface
                 raise TranscriptionError(
