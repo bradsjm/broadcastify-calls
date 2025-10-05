@@ -15,9 +15,6 @@ htmlcov/
 .idea/
 .DS_Store
 
-# uv
-uv.lock
-
 # Environment
 .env
 
