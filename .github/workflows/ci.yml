@@ -1,0 +1,248 @@
+name: CI
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main, develop]
+    workflow_dispatch:
+    workflow_call:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    lint-and-format:
+        name: Lint and Format
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Ruff format check
+              uses: astral-sh/ruff-action@v3
+              with:
+                  args: format --check
+
+            - name: Ruff lint
+              uses: astral-sh/ruff-action@v3
+
+    type-check:
+        name: Type Check
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            contents: read
+        env:
+            PYTHON_VERSION: "3.13"
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v6
+
+            - name: Restore dependencies cache
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      .venv
+                      ${{ env.UV_CACHE_DIR }}
+                  key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-${{ hashFiles('uv.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-
+
+            - name: Sync dependencies
+              shell: bash
+              run: |
+                  for attempt in 1 2 3; do
+                      if uv sync --group dev --group transcription --group audio_processing; then
+                          exit 0
+                      fi
+                      echo "uv sync failed (attempt ${attempt}). Retrying..."
+                      if [ "${attempt}" -eq 3 ]; then
+                          exit 1
+                      fi
+                      sleep $((attempt * 10))
+                  done
+
+            - name: Pyright
+              uses: jakebailey/pyright-action@v2
+
+    test:
+        name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 45
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+                python-version: ["3.13"]
+        permissions:
+            contents: read
+            id-token: write
+        env:
+            PYTHON_VERSION: ${{ matrix.python-version }}
+            UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v6
+
+            - name: Restore dependencies cache
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      .venv
+                      ${{ env.UV_CACHE_DIR }}
+                  key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-${{ hashFiles('uv.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-
+
+            - name: Sync test dependencies
+              shell: bash
+              run: |
+                  for attempt in 1 2 3; do
+                      if uv sync --group dev --group audio_processing --group transcription; then
+                          exit 0
+                      fi
+                      echo "uv sync failed (attempt ${attempt}). Retrying..."
+                      if [ "${attempt}" -eq 3 ]; then
+                          exit 1
+                      fi
+                      sleep $((attempt * 10))
+                  done
+
+            - name: Pytest
+              uses: pavelzw/pytest-action@v2
+              with:
+                  emoji: false
+                  job-summary: true
+
+    security:
+        name: Security Scan
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        permissions:
+            contents: read
+            security-events: write
+        env:
+            PYTHON_VERSION: "3.13"
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v6
+
+            - name: Restore dependencies cache
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      .venv
+                      ${{ env.UV_CACHE_DIR }}
+                  key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-${{ hashFiles('uv.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-
+
+            - name: Sync security dependencies
+              shell: bash
+              run: |
+                  for attempt in 1 2 3; do
+                      if uv sync --group security --group audio_processing --group transcription; then
+                          exit 0
+                      fi
+                      echo "uv sync failed (attempt ${attempt}). Retrying..."
+                      if [ "${attempt}" -eq 3 ]; then
+                          exit 1
+                      fi
+                      sleep $((attempt * 10))
+                  done
+
+            - name: Export requirements for Safety
+              shell: bash
+              run: uv export --group dev --group audio_processing --group transcription --group security --format requirements --output requirements.txt
+
+            - name: Bandit
+              uses: PyCQA/bandit-action@v1
+              with:
+                  targets: src/broadcastify_client
+
+            - name: Safety (OSS database)
+              shell: bash
+              run: uv run safety check --full-report --file requirements.txt
+
+    build:
+        name: Build Distribution
+        runs-on: ubuntu-latest
+        needs: [lint-and-format, type-check, test, security]
+        timeout-minutes: 20
+        env:
+            PYTHON_VERSION: "3.13"
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Build and inspect package
+              id: build-package
+              uses: hynek/build-and-inspect-python-package@v2.9.0
+
+            - name: Locate built wheel
+              id: locate-wheel
+              run: |
+                  wheel_path=$(find "${{ steps.build-package.outputs.dist }}" -maxdepth 1 -type f -name '*.whl' | head -n 1)
+                  if [ -z "$wheel_path" ]; then
+                      echo "No wheel files found in ${{ steps.build-package.outputs.dist }}"
+                      exit 1
+                  fi
+                  echo "wheel-path=$wheel_path" >> "$GITHUB_OUTPUT"
+                  echo "Resolved wheel path: $wheel_path"
+
+            - name: Ensure wheel ships py.typed marker
+              run: |
+                  wheel_path="${{ steps.locate-wheel.outputs.wheel-path }}"
+                  if ! unzip -l "$wheel_path" | grep -q 'py\.typed'; then
+                      echo "py.typed is missing from $wheel_path"
+                      exit 1
+                  fi
+                  echo "Confirmed py.typed present in $wheel_path"
+
+            - name: Ensure wheel metadata advertises typing support
+              run: |
+                  wheel_path="${{ steps.locate-wheel.outputs.wheel-path }}"
+                  if ! unzip -p "$wheel_path" "*.dist-info/METADATA" | grep -q 'Classifier: Typing :: Typed'; then
+                      echo "Typing :: Typed classifier missing from METADATA in $wheel_path"
+                      exit 1
+                  fi
+                  echo "Confirmed Typing :: Typed classifier present"
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: dist
+                  path: ${{ steps.build-package.outputs.dist }}
+                  retention-days: 14

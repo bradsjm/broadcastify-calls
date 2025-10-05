@@ -1,0 +1,353 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "Version to release (e.g., 1.2.3)"
+                required: true
+                type: string
+            prerelease:
+                description: "Mark as pre-release"
+                required: false
+                type: boolean
+                default: false
+
+permissions:
+    contents: write
+    id-token: write # For trusted publishing to PyPI
+
+jobs:
+    validate-tag:
+        name: Validate Release Tag
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        outputs:
+            version: ${{ steps.get-version.outputs.version }}
+            is-prerelease: ${{ steps.check-prerelease.outputs.is-prerelease }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Get version from tag or input
+              id: get-version
+              shell: bash
+              run: |
+                  if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+                      VERSION="${{ github.event.inputs.version }}"
+                  else
+                      VERSION=${GITHUB_REF#refs/tags/v}
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+                  echo "Version: $VERSION"
+
+            - name: Check if pre-release
+              id: check-prerelease
+              shell: bash
+              run: |
+                  VERSION="${{ steps.get-version.outputs.version }}"
+                  if [[ "$VERSION" =~ (alpha|beta|rc|dev) ]] || [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+                      echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+                      echo "This is a pre-release"
+                  else
+                      echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+                      echo "This is a stable release"
+                  fi
+
+            - name: Validate version format
+              shell: bash
+              run: |
+                  VERSION="${{ steps.get-version.outputs.version }}"
+                  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.-]*)?$ ]]; then
+                      echo "❌ Invalid version format: $VERSION"
+                      echo "Expected format: X.Y.Z or X.Y.Z-suffix"
+                      exit 1
+                  fi
+                  echo "✅ Version format is valid: $VERSION"
+
+    run-tests:
+        name: Run Full Test Suite
+        uses: ./.github/workflows/ci.yml
+        needs: validate-tag
+
+    build-release:
+        name: Build Release Artifacts
+        runs-on: ubuntu-latest
+        needs: [validate-tag, run-tests]
+        timeout-minutes: 30
+        env:
+            PYTHON_VERSION: "3.13"
+        outputs:
+            wheel-name: ${{ steps.build.outputs.wheel-name }}
+            sdist-name: ${{ steps.build.outputs.sdist-name }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Update version in pyproject.toml
+              uses: mikefarah/[email protected]
+              env:
+                  RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+              with:
+                  cmd: yq -i -o toml '.project.version = strenv(RELEASE_VERSION)' pyproject.toml
+
+            - name: Confirm version bump
+              run: echo "Updated version to ${{ needs.validate-tag.outputs.version }}"
+            - name: Build and inspect package
+              id: build-package
+              uses: hynek/build-and-inspect-python-package@v2.9.0
+
+            - name: Locate built artifacts
+              id: locate-artifacts
+              run: |
+                  dist_dir="${{ steps.build-package.outputs.dist }}"
+                  wheel_path=$(find "$dist_dir" -maxdepth 1 -type f -name '*.whl' | head -n 1)
+                  sdist_path=$(find "$dist_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)
+                  if [ -z "$wheel_path" ] || [ -z "$sdist_path" ]; then
+                      echo "Missing built wheel or sdist in $dist_dir"
+                      exit 1
+                  fi
+                  echo "wheel-path=$wheel_path" >> "$GITHUB_OUTPUT"
+                  echo "sdist-path=$sdist_path" >> "$GITHUB_OUTPUT"
+                  echo "Captured artifacts: $(basename "$wheel_path"), $(basename "$sdist_path")"
+
+            - name: Ensure wheel ships py.typed marker
+              run: |
+                  wheel_path="${{ steps.locate-artifacts.outputs.wheel-path }}"
+                  if ! unzip -l "$wheel_path" | grep -q 'py\.typed'; then
+                      echo "py.typed is missing from $wheel_path"
+                      exit 1
+                  fi
+                  echo "Confirmed py.typed present in $wheel_path"
+
+            - name: Ensure wheel metadata advertises typing support
+              run: |
+                  wheel_path="${{ steps.locate-artifacts.outputs.wheel-path }}"
+                  if ! unzip -p "$wheel_path" "*.dist-info/METADATA" | grep -q 'Classifier: Typing :: Typed'; then
+                      echo "Typing :: Typed classifier missing from METADATA in $wheel_path"
+                      exit 1
+                  fi
+                  echo "Confirmed Typing :: Typed classifier present"
+
+            - name: Capture artifact names
+              id: build
+              run: |
+                  wheel_name=$(basename "${{ steps.locate-artifacts.outputs.wheel-path }}")
+                  sdist_name=$(basename "${{ steps.locate-artifacts.outputs.sdist-path }}")
+                  echo "wheel-name=$wheel_name" >> "$GITHUB_OUTPUT"
+                  echo "sdist-name=$sdist_name" >> "$GITHUB_OUTPUT"
+                  echo "Built: $wheel_name and $sdist_name"
+
+            - name: Upload release artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: release-dist
+                  path: ${{ steps.build-package.outputs.dist }}
+                  retention-days: 30
+
+    security-scan:
+        name: Security Scan Release
+        runs-on: ubuntu-latest
+        needs: build-release
+        timeout-minutes: 25
+        env:
+            PYTHON_VERSION: "3.13"
+            UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@v6
+
+            - name: Restore dependencies cache
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      .venv
+                      ${{ env.UV_CACHE_DIR }}
+                  key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-${{ hashFiles('uv.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-uv-
+
+            - name: Sync security dependencies
+              shell: bash
+              run: |
+                  for attempt in 1 2 3; do
+                      if uv sync --group security; then
+                          exit 0
+                      fi
+                      echo "uv sync failed (attempt ${attempt}). Retrying..."
+                      if [ "${attempt}" -eq 3 ]; then
+                          exit 1
+                      fi
+                      sleep $((attempt * 10))
+                  done
+
+            - name: Download artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: release-dist
+                  path: dist/
+
+            - name: Install and scan package
+              shell: bash
+              run: |
+                  uv venv test-env
+                  source test-env/bin/activate
+                  pip install dist/*.whl
+                  pip install safety bandit
+
+                  safety check
+                  bandit -r test-env/lib/python*/site-packages/broadcastify_client/ -f json -o security-report.json || true
+
+            - name: Upload security report
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: security-report
+                  path: security-report.json
+                  retention-days: 30
+
+    publish-pypi:
+        name: Publish to PyPI
+        runs-on: ubuntu-latest
+        needs: [validate-tag, build-release, security-scan]
+        timeout-minutes: 20
+        environment:
+            name: pypi
+            url: https://pypi.org/p/broadcastify-calls/
+        steps:
+            - name: Download release artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: release-dist
+                  path: dist/
+
+            - name: Publish to PyPI
+              uses: pypa/gh-action-pypi-publish@release/v1
+              with:
+                  print-hash: true
+                  attestations: true
+
+    create-github-release:
+        name: Create GitHub Release
+        runs-on: ubuntu-latest
+        needs: [validate-tag, build-release, publish-pypi]
+        timeout-minutes: 15
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Download release artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: release-dist
+                  path: dist/
+
+            - name: Generate release notes
+              id: release-notes
+              shell: bash
+              run: |
+                  VERSION="${{ needs.validate-tag.outputs.version }}"
+                  PREV_TAG=$(git tag --sort=-version:refname | grep -v "v$VERSION" | head -n1)
+
+                  {
+                      echo "## What's Changed"
+                      echo ""
+                      if [ -n "$PREV_TAG" ]; then
+                          echo "### Commits since $PREV_TAG"
+                          git log --pretty=format:"- %s (%h)" "$PREV_TAG"..HEAD
+                          echo ""
+                          echo ""
+                      fi
+                      echo "## Installation"
+                      echo ""
+                      echo '```bash'
+                      echo "pip install broadcastify-calls==$VERSION"
+                      echo '```'
+                      echo ""
+                      echo "## Package Files"
+                      echo ""
+                      echo "- 📦 **Wheel**: \`${{ needs.build-release.outputs.wheel-name }}\`"
+                      echo "- 📦 **Source**: \`${{ needs.build-release.outputs.sdist-name }}\`"
+                      echo ""
+                      echo "## Verification"
+                      echo ""
+                      echo "This release includes:"
+                      echo "- ✅ Full type information (\`py.typed\`)"
+                      echo "- ✅ Security scanning passed"
+                      echo "- ✅ Cross-platform testing (Linux, Windows, macOS)"
+                      echo "- ✅ Python 3.13+ compatibility"
+                  } > release_notes.md
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: v${{ needs.validate-tag.outputs.version }}
+                  name: Release v${{ needs.validate-tag.outputs.version }}
+                  body_path: release_notes.md
+                  files: |
+                      dist/*
+                  prerelease: ${{ needs.validate-tag.outputs.is-prerelease == 'true' }}
+                  generate_release_notes: true
+                  make_latest: ${{ needs.validate-tag.outputs.is-prerelease == 'false' }}
+
+    notify-success:
+        name: Notify Release Success
+        runs-on: ubuntu-latest
+        needs: [validate-tag, create-github-release]
+        if: success()
+        timeout-minutes: 5
+        steps:
+            - name: Release Success Summary
+              shell: bash
+              run: |
+                  echo "🎉 Release v${{ needs.validate-tag.outputs.version }} completed successfully!"
+                  echo ""
+                  echo "📦 Published to PyPI: https://pypi.org/project/broadcastify-calls/${{ needs.validate-tag.outputs.version }}/"
+                  echo "🏷️ GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ needs.validate-tag.outputs.version }}"
+                  echo ""
+                  echo "Installation command:"
+                  echo "pip install broadcastify-calls==${{ needs.validate-tag.outputs.version }}"
+
+    notify-failure:
+        name: Notify Release Failure
+        runs-on: ubuntu-latest
+        needs:
+            [
+                validate-tag,
+                build-release,
+                security-scan,
+                publish-pypi,
+                create-github-release,
+            ]
+        if: failure()
+        timeout-minutes: 5
+        steps:
+            - name: Release Failure Summary
+              shell: bash
+              run: |
+                  echo "❌ Release v${{ needs.validate-tag.outputs.version }} failed!"
+                  echo ""
+                  echo "Please check the workflow logs and fix any issues before retrying."
+                  echo "You may need to:"
+                  echo "- Fix any test failures"
+                  echo "- Address security issues"
+                  echo "- Update version numbers"
+                  echo "- Check PyPI publishing credentials"
