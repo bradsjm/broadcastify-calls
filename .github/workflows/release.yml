@@ -103,7 +103,7 @@ jobs:
               run: echo "Updated version to ${{ needs.validate-tag.outputs.version }}"
             - name: Build and inspect package
               id: build-package
-              uses: hynek/build-and-inspect-python-package@v2.9.0
+              uses: hynek/build-and-inspect-python-package@v2.14.0
 
             - name: Locate built artifacts
               id: locate-artifacts
