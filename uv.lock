@@ -99,6 +99,7 @@ dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "rich" },
 ]
 
 [package.optional-dependencies]
@@ -165,6 +166,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.28.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
+    { name = "rich", specifier = ">=14.1.0" },
 ]
 provides-extras = ["audio-processing", "telemetry", "transcription", "transcription-local"]
 

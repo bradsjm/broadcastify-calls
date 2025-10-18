@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Final, cast
 
 from dotenv import find_dotenv, load_dotenv
+
+# Optional UI imports resolved at module import time to satisfy linters
+try:  # pragma: no cover - UI is optional in tests
+    from .ui.runtime import run_ui
+    from .ui.telemetry_sink import UiTelemetrySink
+except ImportError:  # pragma: no cover - optional UI components may be missing
+    UiTelemetrySink = None  # type: ignore[assignment]
+    run_ui = None  # type: ignore[assignment]
 from pydantic import ValidationError
 
 from .client import BroadcastifyClient, BroadcastifyClientDependencies
@@ -31,6 +39,7 @@ from .config import (
 from .errors import AuthenticationError, BroadcastifyError
 from .eventbus import ConsumerCallback
 from .models import AudioPayloadEvent, CallMetadata, LiveCallEnvelope, SourceDescriptor
+from .telemetry import TelemetrySink
 
 LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
@@ -118,6 +127,7 @@ class CliOptions:
     log_level: int
     metadata_limit: int
     transcription: bool
+    ui: bool = field(default=False)
     dump_audio: bool = field(default=False)
     dump_audio_dir: Path | None = field(default=None)
     audio_processing_stages: tuple[AudioProcessingStage, ...] = field(default_factory=tuple)
@@ -163,17 +173,18 @@ async def run_async(options: CliOptions) -> int:
     )
 
     transcription_cfg = _resolve_transcription_config(options.transcription, logger)
-    client = _build_client(transcription_cfg, audio_processing_cfg)
+    # Optionally create a telemetry sink for UI mode so the dashboard can consume metrics.
+    ui_telemetry = UiTelemetrySink() if (options.ui and UiTelemetrySink is not None) else None
+    client = _build_client(transcription_cfg, audio_processing_cfg, telemetry_override=ui_telemetry)
     token_acquired = False
     try:
         await client.authenticate(credentials)
         token_acquired = True
         await _setup_producers(client, options)
-        await _register_live_consumers(client, options, options.metadata_limit, transcription_cfg)
-        await _maybe_register_audio_dumpers(client, options, logger)
-        await client.start()
-        logger.info(_streaming_banner(options))
-        await _wait_for_shutdown_signal()
+        if options.ui:
+            await _run_ui_mode(client, options, transcription_cfg, ui_telemetry)
+        else:
+            await _run_headless_mode(client, options, transcription_cfg, logger)
         logger.info("Shutdown signal received; stopping client")
     except AuthenticationError as exc:
         logger.error("Authentication failed: %s", exc)
@@ -283,6 +294,11 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
             "respects OPENAI_BASE_URL)"
         ),
     )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help=("Enable Rich-based live dashboard (alternate screen) for a modern TUI"),
+    )
     _add_audio_processing_arguments(parser)
     parser.add_argument(
         "--dump-audio",
@@ -350,6 +366,7 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> CliOptions:
         log_level=LOG_LEVELS[namespace.log_level],
         metadata_limit=namespace.metadata_limit,
         transcription=bool(getattr(namespace, "transcription", False)),
+        ui=bool(getattr(namespace, "ui", False)),
         dump_audio=dump_audio_requested,
         dump_audio_dir=resolved_dump_dir,
         audio_processing_stages=stage_tuple,
@@ -481,17 +498,68 @@ def _log_audio_processing_details(cfg: AudioProcessingConfig, logger: logging.Lo
 
 
 def _build_client(
-    transcription_cfg: TranscriptionConfig, audio_cfg: AudioProcessingConfig
+    transcription_cfg: TranscriptionConfig,
+    audio_cfg: AudioProcessingConfig,
+    *,
+    telemetry_override: TelemetrySink | None = None,
 ) -> BroadcastifyClient:
     """Construct a BroadcastifyClient with optional transcription and audio processing."""
     if transcription_cfg.enabled:
         dependencies = BroadcastifyClientDependencies(
             transcription_config=transcription_cfg,
             audio_processing_config=audio_cfg,
+            telemetry=telemetry_override if telemetry_override is not None else None,
         )
     else:
-        dependencies = BroadcastifyClientDependencies(audio_processing_config=audio_cfg)
+        dependencies = BroadcastifyClientDependencies(
+            audio_processing_config=audio_cfg,
+            telemetry=telemetry_override if telemetry_override is not None else None,
+        )
     return BroadcastifyClient(dependencies=dependencies)
+
+
+async def _run_headless_mode(
+    client: BroadcastifyClient,
+    options: CliOptions,
+    transcription_cfg: TranscriptionConfig,
+    logger: logging.Logger,
+) -> None:
+    """Start client and print compact lines to the console until interrupted."""
+    await _register_live_consumers(client, options, options.metadata_limit, transcription_cfg)
+    await _maybe_register_audio_dumpers(client, options, logger)
+    await client.start()
+    logger.info(_streaming_banner(options))
+    await _wait_for_shutdown_signal()
+
+
+async def _run_ui_mode(
+    client: BroadcastifyClient,
+    options: CliOptions,
+    transcription_cfg: TranscriptionConfig,
+    telemetry: TelemetrySink | None,
+) -> None:
+    """Start client and run the Rich UI dashboard until interrupted."""
+    if run_ui is None:
+        # Fallback to headless mode if UI imports are unavailable
+        logger = logging.getLogger("broadcastify_client.cli")
+        logger.warning("UI requested but unavailable; falling back to text mode")
+        await _run_headless_mode(client, options, transcription_cfg, logger)
+        return
+    # Suppress logging to avoid flicker/scrolldown while in alternate screen
+    prev = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        await client.start()
+        logging.getLogger("broadcastify_client.cli").info(_streaming_banner(options))
+        await run_ui(
+            client,
+            options=options,
+            transcription_enabled=transcription_cfg.enabled,
+            max_rows=50,
+            retention_seconds=120,
+        )
+    finally:
+        logging.disable(prev)
 
 
 async def _setup_producers(client: BroadcastifyClient, options: CliOptions) -> None:
@@ -536,10 +604,8 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
     async def _printer(event: object) -> None:
         if not isinstance(event, LiveCallEnvelope):
             return
-        # Print a compact, single-line header that prioritizes the most useful info
-        # for live monitoring. We intentionally omit verbose fields (cursor, expires,
-        # extra detail lines) to keep output readable during active incidents.
-        line = _format_event_header(event)
+        # Revised, friendlier default line to reduce noise.
+        line = _format_event_line(event)
         async with print_lock:
             print(line, flush=True)
 
@@ -547,7 +613,10 @@ def _create_event_printer(metadata_limit: int) -> ConsumerCallback:
 
 
 def _format_event_header(event: LiveCallEnvelope) -> str:
-    """Return a compact, single-line header summarizing the call event."""
+    """Return a compact, single-line header summarizing the call event.
+
+    Deprecated: retained for backward compatibility; prefer _format_event_line.
+    """
     call = event.call
     timestamp = _format_timestamp(call.received_at)
     system_text = _format_system(call.system_name, call.system_id)
@@ -562,6 +631,25 @@ def _format_event_header(event: LiveCallEnvelope) -> str:
         f"duration {duration_text}",
     ]
     return " | ".join(components)
+
+
+# Backward-compatibility alias (referenced to avoid flagged unused function)
+_FORMAT_EVENT_HEADER = _format_event_header
+
+
+def _format_event_line(event: LiveCallEnvelope) -> str:
+    """Return a friendlier, denser single-line summary for live output.
+
+    Format: [HH:MM:SSZ] system/talkgroup | unit | duration | freq
+    """
+    call = event.call
+    ts = call.received_at.astimezone(UTC).strftime("%H:%M:%SZ")
+    sys_part = _format_system(call.system_name, call.system_id)
+    tg_part = _format_group(call.talkgroup_label, call.talkgroup_id)
+    unit = _format_source(call.source)
+    dur = _format_duration(call.duration_seconds)
+    freq = _format_frequency(call.frequency_mhz)
+    return f"[{ts}] {sys_part} / {tg_part} | {unit} | {dur} | {freq}"
 
 
 def _format_timestamp(value: datetime) -> str:
